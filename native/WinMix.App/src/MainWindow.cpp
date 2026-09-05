@@ -10,6 +10,7 @@
 #include <algorithm>
 #include <cmath>
 #include <cwctype>
+#include <limits>
 #include <stdexcept>
 #include <unordered_map>
 #include <unordered_set>
@@ -25,33 +26,41 @@ constexpr wchar_t kClassName[] = L"WinMixCppWindowClass";
 constexpr wchar_t kWindowTitle[] = L"WinMix (C++)";
 
 constexpr float kMargin = 12.0f;
-constexpr float kCardWidth = 64.0f;
+constexpr float kCardWidth = 84.0f;
 constexpr float kCardMargin = 8.0f;
 constexpr float kCardPaddingX = 6.0f;
 constexpr float kCardPaddingTop = 10.0f;
+constexpr float kCardPaddingBottom = 10.0f;
 constexpr float kHeaderHeight = 70.0f;
 constexpr float kIconSize = 20.0f;
-constexpr float kFaderHeight = 130.0f;
+// Floor only -- the fader itself stretches to fill whatever vertical room
+// is left in the card (see LayoutStrip), matching the .NET version's
+// Grid row Height="*" for the slider. Without a floor, a badly squashed
+// window could invert the fader's top/bottom.
+constexpr float kMinFaderHeight = 60.0f;
 constexpr float kLabelHeight = 18.0f;
 constexpr float kMuteHeight = 26.0f;
 constexpr float kComboHeight = 22.0f;
 constexpr float kMeterHeight = 3.0f;
-constexpr float kNameHeight = 18.0f;
+// Two lines: long app names (e.g. "Firefox Nightly Preview") wrap instead
+// of ellipsis-truncating into an unreadable fragment -- see nameFormat_'s
+// WRAP setting in CreateTextFormats.
+constexpr float kNameHeight = 30.0f;
 constexpr float kRowGap = 6.0f;
 
-// Vertical space LayoutStrip actually consumes for one full per-app card
-// (the tallest strip variant -- it's the only one with both the output
-// combo and the peak meter) at scale 1. kMinHeight below is derived from
-// this rather than a separate magic number, so the two can never drift
-// apart and silently clip the last row again.
+// Vertical space LayoutStrip needs for one full per-app card (the tallest
+// strip variant -- it's the only one with both the output combo and the
+// peak meter) at scale 1, assuming the fader is squashed to its floor.
+// kMinHeight below is derived from this rather than a separate magic
+// number, so the two can never drift apart and silently clip the last row.
 constexpr float kStripContentHeight =
     kCardPaddingTop + kIconSize + kRowGap +
-    kFaderHeight + kRowGap +
+    kMinFaderHeight + kRowGap +
     kLabelHeight + kRowGap +
     kMuteHeight + kRowGap +
     kComboHeight + kRowGap +
     kMeterHeight + kRowGap +
-    kNameHeight;
+    kNameHeight + kCardPaddingBottom;
 
 // Fast enough that the peak meters read as continuous, slow enough that
 // re-enumerating sessions stays free -- matches the .NET version's poll
@@ -71,6 +80,12 @@ constexpr float kScalarEpsilon = 0.01f;
 constexpr LONG kMinWidth = 300;
 constexpr LONG kMinHeight = static_cast<LONG>(kHeaderHeight + kStripContentHeight + 2.0f * kMargin);
 constexpr LONG kMaxWidthMargin = 60;
+
+// Height stays a fixed, comfortable size (matching the .NET version's
+// Height="420") rather than tracking content -- the fader absorbs whatever
+// room that leaves via its stretch in LayoutStrip, so there's never a dead
+// gap at the bottom regardless of this value or the user's own resize.
+constexpr float kDefaultHeight = 420.0f;
 
 constexpr UINT kTrayCallbackMessage = WM_APP + 1;
 
@@ -103,17 +118,18 @@ MainWindow::MainWindow(HINSTANCE hInstance)
     RegisterClassExW(&wc);
 
     // CreateWindowExW's width/height are literal physical pixels -- unlike
-    // WPF, where a Height="480" window is DIP units the framework scales to
-    // the monitor automatically, Win32 applies no such scaling. Without this,
-    // the window comes up at a literal 620x480 on a 150%-scaled display while
-    // its own content (scaled by dpiScale_ in Layout()) needs ~1.5x that,
-    // clipping the bottom row. dpiScale_ itself needs an hwnd to compute
-    // (GetDpiForWindow), so this uses the system DPI as the best available
-    // guess before one exists; WM_DPICHANGED corrects it if the window ends
-    // up on a different-DPI monitor than assumed here.
+    // WPF, where a Height="420" window is DIP units the framework scales to
+    // the monitor automatically, Win32 applies no such scaling. dpiScale_
+    // itself needs an hwnd to compute (GetDpiForWindow), so this uses the
+    // system DPI as the best available guess before one exists; WM_DPICHANGED
+    // corrects it if the window ends up on a different-DPI monitor than
+    // assumed here. Width starts at kMinWidth as a placeholder only --
+    // Show()/ShowMixer() run the first Poll()+Layout() (which resizes the
+    // window to fit the real strip count, matching the .NET version's
+    // SizeToContent="Width") before the window is ever made visible.
     const float initialScale = static_cast<float>(GetDpiForSystem()) / 96.0f;
-    const int initialWidth = static_cast<int>(std::lround(620.0f * initialScale));
-    const int initialHeight = static_cast<int>(std::lround(480.0f * initialScale));
+    const int initialWidth = static_cast<int>(std::lround(static_cast<float>(kMinWidth) * initialScale));
+    const int initialHeight = static_cast<int>(std::lround(kDefaultHeight * initialScale));
 
     hwnd_ = CreateWindowExW(
         0, kClassName, kWindowTitle, WS_OVERLAPPEDWINDOW,
@@ -225,18 +241,22 @@ MainWindow::~MainWindow()
 
 void MainWindow::Show(int cmdShow)
 {
+    // Populate real sessions and let Layout() size the window to them
+    // (SyncWindowWidthToContent) before the window is ever visible, rather
+    // than showing it at the placeholder width and then visibly popping to
+    // the real one a moment later.
+    StartPolling();
     ShowWindow(hwnd_, cmdShow);
     UpdateWindow(hwnd_);
-    StartPolling();
 }
 
 void MainWindow::ShowMixer()
 {
-    ShowWindow(hwnd_, IsIconic(hwnd_) ? SW_RESTORE : SW_SHOW);
-    SetForegroundWindow(hwnd_);
     scrollOffsetX_ = 0.0f; // land on the master strip, matching the .NET port's ShowMixer
     StartPolling();
     Layout();
+    ShowWindow(hwnd_, IsIconic(hwnd_) ? SW_RESTORE : SW_SHOW);
+    SetForegroundWindow(hwnd_);
     InvalidateRect(hwnd_, nullptr, FALSE);
 }
 
@@ -500,7 +520,11 @@ void MainWindow::CreateTextFormats()
                               DWRITE_FONT_STRETCH_NORMAL, nameSize, L"en-us", &nameFormat_);
     nameFormat_->SetTextAlignment(DWRITE_TEXT_ALIGNMENT_CENTER);
     nameFormat_->SetParagraphAlignment(DWRITE_PARAGRAPH_ALIGNMENT_NEAR);
-    nameFormat_->SetWordWrapping(DWRITE_WORD_WRAPPING_NO_WRAP);
+    // Wraps onto a second line rather than the single-line format everything
+    // else here uses -- kNameHeight gives it room for exactly two lines, and
+    // the ellipsis trimming below still catches whatever doesn't fit even
+    // then (a name with no natural break point, or three-line-plus names).
+    nameFormat_->SetWordWrapping(DWRITE_WORD_WRAPPING_WRAP);
     ApplyEllipsisTrimming(dwrite, nameFormat_.Get());
 
     dwrite->CreateTextFormat(L"Segoe UI", nullptr, DWRITE_FONT_WEIGHT_NORMAL, DWRITE_FONT_STYLE_NORMAL,
@@ -550,6 +574,56 @@ void MainWindow::Layout()
     }
 
     contentWidth_ = (x - kCardMargin * s) - (margin - scrollOffsetX_);
+
+    SyncWindowWidthToContent();
+}
+
+void MainWindow::SyncWindowWidthToContent()
+{
+    // Mirrors the .NET version's SizeToContent="Width": the window always
+    // matches the current strip count exactly, rather than sitting at some
+    // arbitrary fixed width with empty space to the right of just a few
+    // cards. Manual width dragging is already impossible (see the
+    // WM_NCHITTEST remap below), so there's no user gesture this could fight.
+    if (syncingWindowWidth_ || IsIconic(hwnd_) || IsZoomed(hwnd_))
+    {
+        return;
+    }
+
+    const float desiredClientWidthF = contentWidth_ + 2.0f * kMargin * dpiScale_;
+
+    HMONITOR monitor = MonitorFromWindow(hwnd_, MONITOR_DEFAULTTONEAREST);
+    MONITORINFO mi{};
+    mi.cbSize = sizeof(mi);
+    LONG maxWidth = std::numeric_limits<LONG>::max();
+    if (GetMonitorInfoW(monitor, &mi))
+    {
+        const LONG minWidth = static_cast<LONG>(kMinWidth * dpiScale_);
+        const LONG maxWidthMargin = static_cast<LONG>(kMaxWidthMargin * dpiScale_);
+        maxWidth = std::max(minWidth, (mi.rcWork.right - mi.rcWork.left) - maxWidthMargin);
+    }
+
+    const LONG desiredClientWidth = std::clamp(
+        static_cast<LONG>(std::lround(desiredClientWidthF)),
+        static_cast<LONG>(kMinWidth * dpiScale_), maxWidth);
+
+    RECT windowRect;
+    RECT clientRect;
+    GetWindowRect(hwnd_, &windowRect);
+    GetClientRect(hwnd_, &clientRect);
+    const LONG currentClientWidth = clientRect.right - clientRect.left;
+    if (currentClientWidth == desiredClientWidth)
+    {
+        return;
+    }
+
+    const LONG nonClientWidth = (windowRect.right - windowRect.left) - currentClientWidth;
+    const LONG windowHeight = windowRect.bottom - windowRect.top;
+
+    syncingWindowWidth_ = true;
+    SetWindowPos(hwnd_, nullptr, 0, 0, desiredClientWidth + nonClientWidth, windowHeight,
+                 SWP_NOMOVE | SWP_NOZORDER | SWP_NOACTIVATE);
+    syncingWindowWidth_ = false;
 }
 
 StripLayout MainWindow::LayoutStrip(float left, float top, float height,
@@ -571,9 +645,21 @@ StripLayout MainWindow::LayoutStrip(float left, float top, float height,
     layout.icon = D2D1::RectF(iconCenterX - iconSize / 2.0f, y, iconCenterX + iconSize / 2.0f, y + iconSize);
     y += iconSize + kRowGap * s;
 
+    // The fader stretches to fill whatever vertical room is left in the
+    // card, matching the .NET version's Grid row Height="*" for the slider
+    // -- everything else here is a fixed size, so this is the one row that
+    // makes the card fill the strip's full height with no dead space at the
+    // bottom, at any window height the user resizes to.
+    const float belowFaderHeight =
+        kRowGap + kLabelHeight + kRowGap + kMuteHeight + kRowGap +
+        (outputCombo ? kComboHeight + kRowGap : 0.0f) +
+        (meter ? kMeterHeight + kRowGap : 0.0f) +
+        kNameHeight + kCardPaddingBottom;
+    const float faderHeight = std::max(kMinFaderHeight * s, height - (y - top) - belowFaderHeight * s);
+
     const float faderWidth = 24.0f * s;
     const float faderTop = y;
-    const float faderBottom = faderTop + kFaderHeight * s;
+    const float faderBottom = faderTop + faderHeight;
     fader.SetBounds(D2D1::RectF(left + (cardWidth - faderWidth) / 2.0f, faderTop,
                                  left + (cardWidth + faderWidth) / 2.0f, faderBottom));
     y = faderBottom + kRowGap * s;

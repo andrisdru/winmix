@@ -73,6 +73,7 @@ private:
     void CreateTextFormats();
     void UpdateDpiScale();
     void Layout();
+    void SyncWindowWidthToContent();
     StripLayout LayoutStrip(float left, float top, float height,
                              controls::FaderControl& fader, controls::MuteToggle& mute,
                              controls::PeakMeter* meter, controls::ComboBox* outputCombo);
@@ -153,6 +154,11 @@ private:
 
     float scrollOffsetX_ = 0.0f;
     float contentWidth_ = 0.0f;
+
+    // Reentrancy guard for SyncWindowWidthToContent's SetWindowPos, which
+    // synchronously re-enters WM_SIZE -> Layout() -> SyncWindowWidthToContent
+    // on the same call stack before returning.
+    bool syncingWindowWidth_ = false;
 
     // The fader currently owning a mouse drag, if any.
     controls::FaderControl* draggingFader_ = nullptr;
