@@ -1,0 +1,8 @@
+bin/
+obj/
+.vs/
+*.user
+*.suo
+
+# Local verification artifacts (see CLAUDE.md, "Seeing the app")
+.screenshot.png
