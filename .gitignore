@@ -1,6 +1,11 @@
 .vs/
 *.user
 *.suo
+.vscode/
+
+# CMake
+build/
+CMakeUserPresets.json
 
 # Local verification artifacts (see CLAUDE.md, "Seeing the app")
 .screenshot.png

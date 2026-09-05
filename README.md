@@ -45,7 +45,7 @@ $env:PATH += ";C:\Program Files (x86)\Microsoft Visual Studio\2022\BuildTools\Co
 ## Running
 
 ```powershell
-native\build\x64-debug\WinMix.App\Debug\WinMix.exe
+build\x64-debug\WinMix.App\Debug\WinMix.exe
 ```
 
 WinMix only allows a single running instance — launching a second copy while
@@ -59,10 +59,10 @@ Stop-Process -Name WinMix -Force -ErrorAction SilentlyContinue
 ## Testing
 
 ```powershell
-native\build\x64-debug\tests\Debug\winmix_audio_tests.exe
+build\x64-debug\tests\Debug\winmix_audio_tests.exe
 
 # Run one test case
-native\build\x64-debug\tests\Debug\winmix_audio_tests.exe --test-case="VolumeCurve*"
+build\x64-debug\tests\Debug\winmix_audio_tests.exe --test-case="VolumeCurve*"
 ```
 
 ## Producing a release build
@@ -72,17 +72,17 @@ cmake --build --preset x64-package
 ```
 
 This produces a fully self-contained, statically-linked `WinMix.exe` under
-`native\build\x64-package\WinMix.App\Release\` with tests and dev tools
+`build\x64-package\WinMix.App\Release\` with tests and dev tools
 excluded from the build graph — no VCRUNTIME/MSVCP/UCRT dependency to
 install on the machine that runs it.
 
 ## Project layout
 
-- `native/WinMix.Audio` — all Core Audio / WASAPI interaction, via raw COM
+- `WinMix.Audio` — all Core Audio / WASAPI interaction, via raw COM
   interop (no third-party audio library). No UI dependencies, so it stays
   independently testable.
-- `native/WinMix.App` — the Win32 + Direct2D/DirectWrite shell: the mixer
+- `WinMix.App` — the Win32 + Direct2D/DirectWrite shell: the mixer
   window, custom controls, and tray icon.
-- `native/tests` — doctest tests against `WinMix.Audio`.
-- `native/tools/AudioSmokeTest` — a console tool for verifying the audio
+- `tests` — doctest tests against `WinMix.Audio`.
+- `tools/AudioSmokeTest` — a console tool for verifying the audio
   layer against real playback, independent of the UI.

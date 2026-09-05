@@ -24,11 +24,11 @@ cmake --build --preset x64-release
 cmake --build --preset x64-package    # tools/tests off, matches the shipped exe
 
 # Run
-native/build/x64-debug/WinMix.App/Debug/WinMix.exe
+build/x64-debug/WinMix.App/Debug/WinMix.exe
 
 # Unit tests (doctest)
-native/build/x64-debug/tests/Debug/winmix_audio_tests.exe
-native/build/x64-debug/tests/Debug/winmix_audio_tests.exe --test-case="VolumeCurve*"
+build/x64-debug/tests/Debug/winmix_audio_tests.exe
+build/x64-debug/tests/Debug/winmix_audio_tests.exe --test-case="VolumeCurve*"
 ```
 
 If `cmake`/`ninja` aren't on `PATH`, add the VS Build Tools' bundled copies
@@ -39,7 +39,7 @@ $env:PATH += ";C:\Program Files (x86)\Microsoft Visual Studio\2022\BuildTools\Co
 ```
 
 Both `WinMix.Audio` and `WinMix.App` build as C++20 with the VS generator
-(`CMakePresets.json`), producing a multi-config tree under `native/build/<preset>/`.
+(`CMakePresets.json`), producing a multi-config tree under `build/<preset>/`.
 
 **A running instance silently swallows the next launch.** `WinMain` holds a
 single-instance mutex (`Local\WinMix.SingleInstance`), so a second launch
@@ -54,7 +54,7 @@ Closing the window only hides it. Exit lives in the tray context menu.
 
 ## Architecture
 
-Three CMake targets under `native/`, and the split is load-bearing:
+Three CMake targets at the repo root, and the split is load-bearing:
 
 - **`WinMix.Audio`** (static lib) — all Core Audio/WASAPI interaction via
   raw COM (`Microsoft::WRL::ComPtr`, no wrapper library). No UI types, no
@@ -71,7 +71,7 @@ Three CMake targets under `native/`, and the split is load-bearing:
 
 ### Snapshots, not live COM objects
 
-[AudioSessionService::Refresh()](native/WinMix.Audio/src/AudioSessionService.cpp)
+[AudioSessionService::Refresh()](WinMix.Audio/src/AudioSessionService.cpp)
 returns immutable `AudioSessionSnapshot` values and keeps the live
 `IAudioSessionControl2`/`ISimpleAudioVolume` COM pointers private, keyed by
 session instance ID. Each `Refresh()` releases the previous batch of
@@ -82,7 +82,7 @@ steadily. Mutations go back through `SetVolume(instanceId, …)` /
 ### Polling, not notifications
 
 Discovery is a 100 ms `SetTimer` (`kPollTimerId`/`kPollIntervalMs` in
-[MainWindow.cpp](native/WinMix.App/src/MainWindow.cpp)), not
+[MainWindow.cpp](WinMix.App/src/MainWindow.cpp)), not
 `IAudioSessionNotification`. WASAPI delivers those callbacks off-thread, and
 re-entering the session manager from inside one deadlocks. Polling
 sidesteps it and is imperceptible for a mixer. Do not "upgrade" this to
@@ -113,21 +113,21 @@ state, so both must avoid fighting the user:
 ### Slider position is not amplitude
 
 WASAPI wants linear amplitude; loudness is perceived logarithmically. All
-conversion goes through [VolumeCurve](native/WinMix.Audio/src/VolumeCurve.cpp),
+conversion goes through [VolumeCurve](WinMix.Audio/src/VolumeCurve.cpp),
 which treats slider travel as linear across −60 dB…0 dB. Position 0 maps to
 true silence rather than the floor. Never assign a slider value straight to
 `ISimpleAudioVolume::SetMasterVolume`.
 
 ### Row naming
 
-[SessionNaming](native/WinMix.Audio/src/SessionNaming.cpp) mirrors the
+[SessionNaming](WinMix.Audio/src/SessionNaming.cpp) mirrors the
 Windows mixer's precedence: `IsSystemSoundsSession` → the session's own
 display name → the executable's `FileDescription` → its file name. System
 sessions report display names as indirect resource references
 (`@%SystemRoot%\System32\AudioSrv.Dll,-202`) that need
 `SHLoadIndirectString`; without that step rows read as bare `svchost`.
 
-[ProcessInfoCache](native/WinMix.Audio/src/ProcessInfoCache.cpp) resolves
+[ProcessInfoCache](WinMix.Audio/src/ProcessInfoCache.cpp) resolves
 paths with `QueryFullProcessImageNameW` under
 `PROCESS_QUERY_LIMITED_INFORMATION`, not `PROCESS_VM_READ` — that's denied
 for anything more elevated than us. It must keep trimming stale pids each
@@ -136,8 +136,8 @@ session.
 
 ### The two undocumented COM interop shims
 
-- [AudioPolicyConfigFactory](native/WinMix.Audio/src/AudioPolicyConfigFactory.cpp)
-  and [PolicyConfigInterop](native/WinMix.Audio/src/PolicyConfigInterop.cpp)
+- [AudioPolicyConfigFactory](WinMix.Audio/src/AudioPolicyConfigFactory.cpp)
+  and [PolicyConfigInterop](WinMix.Audio/src/PolicyConfigInterop.cpp)
   are hand-declared `IInspectable`/`IUnknown`-derived vtable structs for
   undocumented Windows interfaces — there is no header for either. The
   vtable slot counts must be exact: a past bug here (fixed) had 9 leading
@@ -155,7 +155,7 @@ session.
 ## DPI and layout (the part most recently debugged)
 
 This app renders through Direct2D pinned to a flat 96 DPI
-([DeviceResources.cpp](native/WinMix.App/src/render/DeviceResources.cpp),
+([DeviceResources.cpp](WinMix.App/src/render/DeviceResources.cpp),
 `SetDpi(96, 96)` deliberately, not `GetDpiForWindow`) so that D2D's
 coordinate space always equals physical pixels — every layout constant and
 every mouse-derived hit-test rect is already a raw physical-pixel value, and

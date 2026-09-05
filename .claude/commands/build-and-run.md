@@ -24,7 +24,7 @@ Build and run WinMix, restarting it if an instance is already running.
 
 3. Launch the app in the background so this command can finish:
    ```
-   native\build\x64-debug\WinMix.App\Debug\WinMix.exe
+   build\x64-debug\WinMix.App\Debug\WinMix.exe
    ```
 
 4. Confirm it actually started: check `tasklist` for `WinMix.exe` and check the
