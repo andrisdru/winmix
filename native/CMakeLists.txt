@@ -1,4 +1,11 @@
 cmake_minimum_required(VERSION 3.26)
+
+# Must precede project(): CMP0091=NEW makes CMAKE_MSVC_RUNTIME_LIBRARY (set
+# below) actually control the CRT choice, instead of CMake silently always
+# picking the dynamic CRT (/MD) regardless of this variable.
+cmake_policy(SET CMP0091 NEW)
+set(CMAKE_MSVC_RUNTIME_LIBRARY "MultiThreaded$<$<CONFIG:Debug>:Debug>")
+
 project(WinMixCpp LANGUAGES CXX)
 
 set(CMAKE_CXX_STANDARD 20)
