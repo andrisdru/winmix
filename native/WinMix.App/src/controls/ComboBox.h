@@ -29,6 +29,12 @@ public:
     void SetBounds(D2D1_RECT_F bounds) { bounds_ = bounds; }
     const D2D1_RECT_F& Bounds() const { return bounds_; }
 
+    // DPI scale factor (GetDpiForWindow()/96). Drives both the D2D-drawn
+    // closed button's fixed-DIP details (corner radius, caret) and the
+    // GDI popup's font size/row height, since bounds_ alone (already scaled
+    // by the caller) says nothing about how large text inside it should be.
+    void SetScale(float scale);
+
     void SetItems(std::vector<std::wstring> items) { items_ = std::move(items); }
     void SetSelectedIndex(int index) { selectedIndex_ = index; } // programmatic, no onChange
     int SelectedIndex() const { return selectedIndex_; }
@@ -51,10 +57,13 @@ private:
     void OpenPopup();
     void PaintPopup(HWND hwnd);
     int ItemAtY(int y) const;
+    void EnsureGdiFont();
+    int RowHeight() const;
 
     HWND owner_;
     HWND popupHwnd_ = nullptr;
     D2D1_RECT_F bounds_{};
+    float scale_ = 1.0f;
     std::vector<std::wstring> items_;
     int selectedIndex_ = -1;
     int hoveredIndex_ = -1;
@@ -62,10 +71,12 @@ private:
     HBRUSH panelGdiBrush_ = nullptr;
     HBRUSH hoverGdiBrush_ = nullptr;
     COLORREF textColorRef_ = RGB(255, 255, 255);
+    HFONT gdiFont_ = nullptr;
+    float gdiFontScale_ = 0.0f; // scale_ the current gdiFont_ was built for
 
     mutable Microsoft::WRL::ComPtr<ID2D1PathGeometry> caretGeometry_;
 
-    static constexpr int kRowHeight = 24;
+    static constexpr int kBaseRowHeight = 24;
 };
 
 } // namespace winmix::app::controls

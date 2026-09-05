@@ -18,6 +18,10 @@ public:
     void SetBounds(D2D1_RECT_F bounds) { bounds_ = bounds; }
     const D2D1_RECT_F& Bounds() const { return bounds_; }
 
+    // DPI scale factor for the hand-drawn glyph, which is otherwise a
+    // fixed-DIP shape independent of bounds_'s (already-scaled) size.
+    void SetScale(float scale) { scale_ = scale; }
+
     bool IsMuted() const { return muted_; }
     void SetMuted(bool muted) { muted_ = muted; } // programmatic, no onChange
 
@@ -32,6 +36,7 @@ public:
 
 private:
     D2D1_RECT_F bounds_{};
+    float scale_ = 1.0f;
     bool muted_ = false;
     bool hovered_ = false;
     mutable Microsoft::WRL::ComPtr<ID2D1PathGeometry> speakerGeometry_;

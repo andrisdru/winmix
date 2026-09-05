@@ -16,6 +16,11 @@ public:
     void SetBounds(D2D1_RECT_F bounds) { bounds_ = bounds; }
     const D2D1_RECT_F& Bounds() const { return bounds_; }
 
+    // DPI scale factor (GetDpiForWindow()/96) for the track width and thumb
+    // radius, which are drawn as fixed-DIP constants rather than proportions
+    // of bounds_. bounds_ itself is already scaled by the caller (Layout()).
+    void SetScale(float scale) { scale_ = scale; }
+
     double Value() const { return value_; }
 
     // Programmatic set (e.g. from a poll or fake data) -- does not fire onChange.
@@ -41,6 +46,7 @@ private:
     double PositionFromPoint(float y) const;
 
     D2D1_RECT_F bounds_{};
+    float scale_ = 1.0f;
     double value_ = 0.0;
     bool dragging_ = false;
     bool hovered_ = false;

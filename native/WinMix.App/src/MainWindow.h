@@ -71,6 +71,7 @@ private:
 
     void CreateBrushes();
     void CreateTextFormats();
+    void UpdateDpiScale();
     void Layout();
     StripLayout LayoutStrip(float left, float top, float height,
                              controls::FaderControl& fader, controls::MuteToggle& mute,
@@ -141,6 +142,14 @@ private:
     std::vector<std::wstring> outputDeviceIds_;
     std::vector<std::wstring> inputDeviceIds_;
     std::vector<ChannelStrip> strips_;
+
+    // GetDpiForWindow()/96. D2D itself is pinned to 96 DPI (DeviceResources)
+    // so rendering and mouse hit-testing always agree; this factor is how
+    // the app scales its OWN layout constants and font sizes to still look
+    // physically correct-sized at every display scale, the way WPF's
+    // automatic DIP scaling did for the .NET version. Applied throughout
+    // Layout()/LayoutStrip() and passed to controls via SetScale().
+    float dpiScale_ = 1.0f;
 
     float scrollOffsetX_ = 0.0f;
     float contentWidth_ = 0.0f;

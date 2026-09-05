@@ -7,6 +7,7 @@ namespace winmix::app::controls {
 namespace {
 constexpr float kTrackHalfWidth = 2.0f;
 constexpr float kThumbRadius = 7.0f;
+constexpr float kRingWidth = 2.0f;
 } // namespace
 
 void FaderControl::SetValue(double value)
@@ -16,8 +17,9 @@ void FaderControl::SetValue(double value)
 
 double FaderControl::PositionFromPoint(float y) const
 {
-    const float travelTop = bounds_.top + kThumbRadius;
-    const float travelBottom = bounds_.bottom - kThumbRadius;
+    const float thumbRadius = kThumbRadius * scale_;
+    const float travelTop = bounds_.top + thumbRadius;
+    const float travelBottom = bounds_.bottom - thumbRadius;
     if (travelBottom <= travelTop)
     {
         return 0.0;
@@ -71,29 +73,32 @@ void FaderControl::Draw(ID2D1DeviceContext* ctx,
                          ID2D1SolidColorBrush* thumbBrush, ID2D1SolidColorBrush* thumbHoverBrush,
                          ID2D1SolidColorBrush* ringBrush) const
 {
+    const float trackHalfWidth = kTrackHalfWidth * scale_;
+    const float thumbRadius = kThumbRadius * scale_;
+
     const float centerX = (bounds_.left + bounds_.right) / 2.0f;
 
     const D2D1_ROUNDED_RECT trackRect = D2D1::RoundedRect(
-        D2D1::RectF(centerX - kTrackHalfWidth, bounds_.top, centerX + kTrackHalfWidth, bounds_.bottom),
-        kTrackHalfWidth, kTrackHalfWidth);
+        D2D1::RectF(centerX - trackHalfWidth, bounds_.top, centerX + trackHalfWidth, bounds_.bottom),
+        trackHalfWidth, trackHalfWidth);
     ctx->FillRoundedRectangle(trackRect, trackBrush);
 
-    const float travelTop = bounds_.top + kThumbRadius;
-    const float travelBottom = bounds_.bottom - kThumbRadius;
+    const float travelTop = bounds_.top + thumbRadius;
+    const float travelBottom = bounds_.bottom - thumbRadius;
     const float thumbY = travelBottom - static_cast<float>(value_) * (travelBottom - travelTop);
 
     if (thumbY < travelBottom)
     {
         const D2D1_ROUNDED_RECT fillRect = D2D1::RoundedRect(
-            D2D1::RectF(centerX - kTrackHalfWidth, thumbY, centerX + kTrackHalfWidth, bounds_.bottom),
-            kTrackHalfWidth, kTrackHalfWidth);
+            D2D1::RectF(centerX - trackHalfWidth, thumbY, centerX + trackHalfWidth, bounds_.bottom),
+            trackHalfWidth, trackHalfWidth);
         ctx->FillRoundedRectangle(fillRect, fillBrush);
     }
 
     ID2D1SolidColorBrush* knobBrush = (hovered_ || dragging_) ? thumbHoverBrush : thumbBrush;
-    const D2D1_ELLIPSE knob = D2D1::Ellipse(D2D1::Point2F(centerX, thumbY), kThumbRadius, kThumbRadius);
+    const D2D1_ELLIPSE knob = D2D1::Ellipse(D2D1::Point2F(centerX, thumbY), thumbRadius, thumbRadius);
     ctx->FillEllipse(knob, knobBrush);
-    ctx->DrawEllipse(knob, ringBrush, 2.0f);
+    ctx->DrawEllipse(knob, ringBrush, kRingWidth * scale_);
 }
 
 } // namespace winmix::app::controls

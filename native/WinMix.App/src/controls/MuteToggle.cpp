@@ -28,7 +28,7 @@ void MuteToggle::Draw(ID2D1DeviceContext* ctx, ID2D1SolidColorBrush* chromeHover
 {
     if (hovered_)
     {
-        ctx->FillRoundedRectangle(D2D1::RoundedRect(bounds_, 4.0f, 4.0f), chromeHoverBrush);
+        ctx->FillRoundedRectangle(D2D1::RoundedRect(bounds_, 4.0f * scale_, 4.0f * scale_), chromeHoverBrush);
     }
 
     ComPtr<ID2D1Factory> factory;
@@ -49,23 +49,27 @@ void MuteToggle::Draw(ID2D1DeviceContext* ctx, ID2D1SolidColorBrush* chromeHover
         sink->Close();
     }
 
-    const float cx = (bounds_.left + bounds_.right) / 2.0f - 3.0f;
+    const float cx = (bounds_.left + bounds_.right) / 2.0f - 3.0f * scale_;
     const float cy = (bounds_.top + bounds_.bottom) / 2.0f;
 
     ID2D1SolidColorBrush* brush = muted_ ? mutedGlyphBrush : glyphBrush;
 
     ComPtr<ID2D1TransformedGeometry> transformed;
-    factory->CreateTransformedGeometry(speakerGeometry_.Get(), D2D1::Matrix3x2F::Translation(cx, cy), &transformed);
+    const D2D1::Matrix3x2F transform = D2D1::Matrix3x2F::Scale(scale_, scale_) * D2D1::Matrix3x2F::Translation(cx, cy);
+    factory->CreateTransformedGeometry(speakerGeometry_.Get(), transform, &transformed);
     ctx->FillGeometry(transformed.Get(), brush);
 
     if (muted_)
     {
-        ctx->DrawLine(D2D1::Point2F(cx - 2.0f, cy - 8.0f), D2D1::Point2F(cx + 9.0f, cy + 8.0f), mutedGlyphBrush, 2.0f);
+        ctx->DrawLine(D2D1::Point2F(cx - 2.0f * scale_, cy - 8.0f * scale_),
+                      D2D1::Point2F(cx + 9.0f * scale_, cy + 8.0f * scale_), mutedGlyphBrush, 2.0f * scale_);
     }
     else
     {
-        ctx->DrawLine(D2D1::Point2F(cx + 5.0f, cy - 5.0f), D2D1::Point2F(cx + 9.0f, cy - 8.0f), glyphBrush, 1.5f);
-        ctx->DrawLine(D2D1::Point2F(cx + 5.0f, cy + 5.0f), D2D1::Point2F(cx + 9.0f, cy + 8.0f), glyphBrush, 1.5f);
+        ctx->DrawLine(D2D1::Point2F(cx + 5.0f * scale_, cy - 5.0f * scale_),
+                      D2D1::Point2F(cx + 9.0f * scale_, cy - 8.0f * scale_), glyphBrush, 1.5f * scale_);
+        ctx->DrawLine(D2D1::Point2F(cx + 5.0f * scale_, cy + 5.0f * scale_),
+                      D2D1::Point2F(cx + 9.0f * scale_, cy + 8.0f * scale_), glyphBrush, 1.5f * scale_);
     }
 }
 

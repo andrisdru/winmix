@@ -4,6 +4,7 @@
 #include <windowsx.h>
 
 #include <algorithm>
+#include <cmath>
 
 using Microsoft::WRL::ComPtr;
 
@@ -11,6 +12,8 @@ namespace winmix::app::controls {
 
 namespace {
 constexpr wchar_t kPopupClassName[] = L"WinMixCppComboPopup";
+constexpr int kBaseFontHeight = 14; // logical pixels at 96 DPI, negative-height (character height) convention
+constexpr int kPopupMinWidth = 160; // logical pixels at 96 DPI, before scaling
 } // namespace
 
 ComboBox::ComboBox(HWND owner) : owner_(owner)
@@ -34,6 +37,40 @@ ComboBox::~ComboBox()
     CloseIfOpen();
     DeleteObject(panelGdiBrush_);
     DeleteObject(hoverGdiBrush_);
+    if (gdiFont_)
+    {
+        DeleteObject(gdiFont_);
+    }
+}
+
+void ComboBox::SetScale(float scale)
+{
+    scale_ = scale;
+}
+
+void ComboBox::EnsureGdiFont()
+{
+    if (gdiFont_ && gdiFontScale_ == scale_)
+    {
+        return;
+    }
+
+    if (gdiFont_)
+    {
+        DeleteObject(gdiFont_);
+    }
+
+    const int height = -static_cast<int>(std::lround(kBaseFontHeight * scale_));
+    gdiFont_ = CreateFontW(
+        height, 0, 0, 0, FW_NORMAL, FALSE, FALSE, FALSE,
+        DEFAULT_CHARSET, OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS,
+        CLEARTYPE_QUALITY, DEFAULT_PITCH | FF_DONTCARE, L"Segoe UI");
+    gdiFontScale_ = scale_;
+}
+
+int ComboBox::RowHeight() const
+{
+    return static_cast<int>(std::lround(kBaseRowHeight * scale_));
 }
 
 std::wstring ComboBox::SelectedText() const
@@ -83,11 +120,36 @@ void ComboBox::OpenPopup()
         return;
     }
 
+    EnsureGdiFont();
+
     POINT topLeft{static_cast<int>(bounds_.left), static_cast<int>(bounds_.bottom) + 2};
     ClientToScreen(owner_, &topLeft);
 
-    const int width = std::max(120, static_cast<int>(bounds_.right - bounds_.left));
-    const int height = static_cast<int>(items_.size()) * kRowHeight + 4;
+    // Width fits the widest item's actual rendered text (in the same font
+    // the popup will paint with), not just the closed button's width --
+    // otherwise longer device names truncate under ellipsis no matter how
+    // wide the button itself is.
+    int widestTextWidth = 0;
+    {
+        HDC screenDc = GetDC(nullptr);
+        HDC memDc = CreateCompatibleDC(screenDc);
+        HFONT oldFont = static_cast<HFONT>(SelectObject(memDc, gdiFont_));
+        for (const auto& item : items_)
+        {
+            SIZE extent{};
+            GetTextExtentPoint32W(memDc, item.c_str(), static_cast<int>(item.size()), &extent);
+            widestTextWidth = std::max(widestTextWidth, static_cast<int>(extent.cx));
+        }
+        SelectObject(memDc, oldFont);
+        DeleteDC(memDc);
+        ReleaseDC(nullptr, screenDc);
+    }
+
+    const int textPadding = static_cast<int>(std::lround(16.0f * scale_)); // 8px each side
+    const int buttonWidth = static_cast<int>(bounds_.right - bounds_.left);
+    const int minWidth = static_cast<int>(std::lround(kPopupMinWidth * scale_));
+    const int width = std::max({buttonWidth, minWidth, widestTextWidth + textPadding});
+    const int height = static_cast<int>(items_.size()) * RowHeight() + 4;
 
     popupHwnd_ = CreateWindowExW(
         WS_EX_TOOLWINDOW,
@@ -111,7 +173,8 @@ int ComboBox::ItemAtY(int y) const
     {
         return -1;
     }
-    const int index = (y - 2) / kRowHeight;
+    const int rowHeight = RowHeight();
+    const int index = (y - 2) / rowHeight;
     return (index >= 0 && index < static_cast<int>(items_.size())) ? index : -1;
 }
 
@@ -124,22 +187,27 @@ void ComboBox::PaintPopup(HWND hwnd)
     GetClientRect(hwnd, &client);
     FillRect(hdc, &client, panelGdiBrush_);
 
+    HFONT oldFont = static_cast<HFONT>(SelectObject(hdc, gdiFont_));
     SetBkMode(hdc, TRANSPARENT);
     SetTextColor(hdc, textColorRef_);
 
+    const int rowHeight = RowHeight();
+    const int textLeftPad = static_cast<int>(std::lround(8.0f * scale_));
+
     for (size_t i = 0; i < items_.size(); ++i)
     {
-        RECT row{2, 2 + static_cast<int>(i) * kRowHeight, client.right - 2, 2 + static_cast<int>(i + 1) * kRowHeight};
+        RECT row{2, 2 + static_cast<int>(i) * rowHeight, client.right - 2, 2 + static_cast<int>(i + 1) * rowHeight};
         if (static_cast<int>(i) == hoveredIndex_)
         {
             FillRect(hdc, &row, hoverGdiBrush_);
         }
         RECT textRect = row;
-        textRect.left += 8;
+        textRect.left += textLeftPad;
         DrawTextW(hdc, items_[i].c_str(), -1, &textRect,
                   DT_SINGLELINE | DT_VCENTER | DT_LEFT | DT_END_ELLIPSIS | DT_NOPREFIX);
     }
 
+    SelectObject(hdc, oldFont);
     EndPaint(hwnd, &ps);
 }
 
@@ -207,12 +275,13 @@ void ComboBox::Draw(ID2D1DeviceContext* ctx, IDWriteTextFormat* textFormat,
                      ID2D1SolidColorBrush* panelBrush, ID2D1SolidColorBrush* borderBrush,
                      ID2D1SolidColorBrush* textBrush, ID2D1SolidColorBrush* caretBrush) const
 {
-    ctx->FillRoundedRectangle(D2D1::RoundedRect(bounds_, 4.0f, 4.0f), panelBrush);
-    ctx->DrawRoundedRectangle(D2D1::RoundedRect(bounds_, 4.0f, 4.0f), borderBrush, 1.0f);
+    const float radius = 4.0f * scale_;
+    ctx->FillRoundedRectangle(D2D1::RoundedRect(bounds_, radius, radius), panelBrush);
+    ctx->DrawRoundedRectangle(D2D1::RoundedRect(bounds_, radius, radius), borderBrush, 1.0f * scale_);
 
     D2D1_RECT_F textRect = bounds_;
-    textRect.left += 8.0f;
-    textRect.right -= 20.0f;
+    textRect.left += 8.0f * scale_;
+    textRect.right -= 20.0f * scale_;
 
     const std::wstring text = SelectedText();
     ctx->DrawText(text.c_str(), static_cast<UINT32>(text.size()), textFormat, textRect, textBrush,
@@ -233,11 +302,12 @@ void ComboBox::Draw(ID2D1DeviceContext* ctx, IDWriteTextFormat* textFormat,
         sink->Close();
     }
 
-    const float cx = bounds_.right - 12.0f;
+    const float cx = bounds_.right - 12.0f * scale_;
     const float cy = (bounds_.top + bounds_.bottom) / 2.0f;
 
     ComPtr<ID2D1TransformedGeometry> transformed;
-    factory->CreateTransformedGeometry(caretGeometry_.Get(), D2D1::Matrix3x2F::Translation(cx, cy), &transformed);
+    const D2D1::Matrix3x2F transform = D2D1::Matrix3x2F::Scale(scale_, scale_) * D2D1::Matrix3x2F::Translation(cx, cy);
+    factory->CreateTransformedGeometry(caretGeometry_.Get(), transform, &transformed);
     ctx->FillGeometry(transformed.Get(), caretBrush);
 }
 

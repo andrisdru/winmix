@@ -81,6 +81,8 @@ MainWindow::MainWindow(HINSTANCE hInstance)
         throw std::runtime_error("CreateWindowExW failed");
     }
 
+    UpdateDpiScale();
+
     const HICON appIcon = LoadIconW(hInstance, MAKEINTRESOURCE(IDI_APPICON));
     SendMessageW(hwnd_, WM_SETICON, ICON_SMALL, reinterpret_cast<LPARAM>(appIcon));
     SendMessageW(hwnd_, WM_SETICON, ICON_BIG, reinterpret_cast<LPARAM>(appIcon));
@@ -341,9 +343,30 @@ LRESULT MainWindow::WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam)
         }
     }
 
+    case WM_DPICHANGED:
+    {
+        // The window moved to a monitor with a different scale factor.
+        // Update our own scale before the resulting resize/repaint (below)
+        // uses it, then follow the OS's suggested rect for the new DPI.
+        UpdateDpiScale();
+        if (resources_)
+        {
+            CreateTextFormats();
+        }
+
+        const auto* suggested = reinterpret_cast<const RECT*>(lParam);
+        SetWindowPos(hwnd, nullptr, suggested->left, suggested->top,
+                     suggested->right - suggested->left, suggested->bottom - suggested->top,
+                     SWP_NOZORDER | SWP_NOACTIVATE);
+        return 0;
+    }
+
     case WM_GETMINMAXINFO:
     {
         auto* mmi = reinterpret_cast<MINMAXINFO*>(lParam);
+        const LONG minWidth = static_cast<LONG>(kMinWidth * dpiScale_);
+        const LONG minHeight = static_cast<LONG>(kMinHeight * dpiScale_);
+        const LONG maxWidthMargin = static_cast<LONG>(kMaxWidthMargin * dpiScale_);
         // The window's *current* monitor, not the primary -- a long session
         // list should be able to use the full width of whichever screen the
         // window actually lives on.
@@ -352,11 +375,11 @@ LRESULT MainWindow::WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam)
         mi.cbSize = sizeof(mi);
         if (GetMonitorInfoW(monitor, &mi))
         {
-            const LONG maxWidth = std::max(kMinWidth, (mi.rcWork.right - mi.rcWork.left) - kMaxWidthMargin);
+            const LONG maxWidth = std::max(minWidth, (mi.rcWork.right - mi.rcWork.left) - maxWidthMargin);
             mmi->ptMaxTrackSize.x = maxWidth;
         }
-        mmi->ptMinTrackSize.x = kMinWidth;
-        mmi->ptMinTrackSize.y = kMinHeight;
+        mmi->ptMinTrackSize.x = minWidth;
+        mmi->ptMinTrackSize.y = minHeight;
         return 0;
     }
 
@@ -385,6 +408,11 @@ LRESULT MainWindow::WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam)
     }
 }
 
+void MainWindow::UpdateDpiScale()
+{
+    dpiScale_ = static_cast<float>(GetDpiForWindow(hwnd_)) / 96.0f;
+}
+
 void MainWindow::CreateBrushes()
 {
     auto* ctx = resources_->Context();
@@ -402,21 +430,36 @@ void MainWindow::CreateBrushes()
 
 void MainWindow::CreateTextFormats()
 {
+    // Reset first: ComPtr's operator& does not release an existing pointee,
+    // and this can run again on a DPI change or a device-lost recreate.
+    labelFormat_.Reset();
+    nameFormat_.Reset();
+    comboFormat_.Reset();
+
     auto* dwrite = resources_->DWriteFactory();
 
+    // D2D itself renders at a flat 96 DPI (DeviceResources) so hit-testing
+    // stays aligned with rendering at every scale factor; font sizes have
+    // to make up the difference themselves here, the way WPF's automatic
+    // DIP scaling did for the .NET version, or text reads too small on any
+    // display above 100%.
+    const float labelSize = 11.0f * dpiScale_;
+    const float nameSize = 10.0f * dpiScale_;
+    const float comboSize = 11.0f * dpiScale_;
+
     dwrite->CreateTextFormat(L"Segoe UI", nullptr, DWRITE_FONT_WEIGHT_NORMAL, DWRITE_FONT_STYLE_NORMAL,
-                              DWRITE_FONT_STRETCH_NORMAL, 11.0f, L"en-us", &labelFormat_);
+                              DWRITE_FONT_STRETCH_NORMAL, labelSize, L"en-us", &labelFormat_);
     labelFormat_->SetTextAlignment(DWRITE_TEXT_ALIGNMENT_CENTER);
     labelFormat_->SetParagraphAlignment(DWRITE_PARAGRAPH_ALIGNMENT_CENTER);
 
     dwrite->CreateTextFormat(L"Segoe UI", nullptr, DWRITE_FONT_WEIGHT_NORMAL, DWRITE_FONT_STYLE_NORMAL,
-                              DWRITE_FONT_STRETCH_NORMAL, 10.0f, L"en-us", &nameFormat_);
+                              DWRITE_FONT_STRETCH_NORMAL, nameSize, L"en-us", &nameFormat_);
     nameFormat_->SetTextAlignment(DWRITE_TEXT_ALIGNMENT_CENTER);
     nameFormat_->SetParagraphAlignment(DWRITE_PARAGRAPH_ALIGNMENT_NEAR);
     nameFormat_->SetWordWrapping(DWRITE_WORD_WRAPPING_NO_WRAP);
 
     dwrite->CreateTextFormat(L"Segoe UI", nullptr, DWRITE_FONT_WEIGHT_NORMAL, DWRITE_FONT_STYLE_NORMAL,
-                              DWRITE_FONT_STRETCH_NORMAL, 11.0f, L"en-us", &comboFormat_);
+                              DWRITE_FONT_STRETCH_NORMAL, comboSize, L"en-us", &comboFormat_);
     comboFormat_->SetTextAlignment(DWRITE_TEXT_ALIGNMENT_LEADING);
     comboFormat_->SetParagraphAlignment(DWRITE_PARAGRAPH_ALIGNMENT_CENTER);
     comboFormat_->SetWordWrapping(DWRITE_WORD_WRAPPING_NO_WRAP);
@@ -424,72 +467,97 @@ void MainWindow::CreateTextFormats()
 
 void MainWindow::Layout()
 {
+    const float s = dpiScale_;
+
     RECT client;
     GetClientRect(hwnd_, &client);
     const float clientHeight = static_cast<float>(client.bottom - client.top);
 
-    outputCombo_->SetBounds(D2D1::RectF(kMargin + 56.0f, kMargin, kMargin + 240.0f, kMargin + 24.0f));
-    inputCombo_->SetBounds(D2D1::RectF(kMargin + 56.0f, kMargin + 32.0f, kMargin + 240.0f, kMargin + 56.0f));
+    const float margin = kMargin * s;
 
-    const float stripsTop = kMargin + kHeaderHeight;
-    const float stripsHeight = clientHeight - stripsTop - kMargin;
+    outputCombo_->SetScale(s);
+    outputCombo_->SetBounds(D2D1::RectF(margin + 56.0f * s, margin, margin + 240.0f * s, margin + 24.0f * s));
+    inputCombo_->SetScale(s);
+    inputCombo_->SetBounds(D2D1::RectF(margin + 56.0f * s, margin + 32.0f * s, margin + 240.0f * s, margin + 56.0f * s));
 
-    float x = kMargin - scrollOffsetX_;
+    const float stripsTop = margin + kHeaderHeight * s;
+    const float stripsHeight = clientHeight - stripsTop - margin;
 
+    float x = margin - scrollOffsetX_;
+
+    masterFader_.SetScale(s);
+    masterMute_.SetScale(s);
     masterLayout_ = LayoutStrip(x, stripsTop, stripsHeight, masterFader_, masterMute_, nullptr, nullptr);
-    x += kCardWidth + kCardMargin;
+    x += (kCardWidth + kCardMargin) * s;
 
     for (auto& strip : strips_)
     {
+        strip.fader.SetScale(s);
+        strip.mute.SetScale(s);
+        if (strip.outputCombo)
+        {
+            strip.outputCombo->SetScale(s);
+        }
         strip.layout = LayoutStrip(x, stripsTop, stripsHeight, strip.fader, strip.mute,
                                     &strip.meter, strip.outputCombo.get());
-        x += kCardWidth + kCardMargin;
+        x += (kCardWidth + kCardMargin) * s;
     }
 
-    contentWidth_ = (x - kCardMargin) - (kMargin - scrollOffsetX_);
+    contentWidth_ = (x - kCardMargin * s) - (margin - scrollOffsetX_);
 }
 
 StripLayout MainWindow::LayoutStrip(float left, float top, float height,
                                      controls::FaderControl& fader, controls::MuteToggle& mute,
                                      controls::PeakMeter* meter, controls::ComboBox* outputCombo)
 {
+    const float s = dpiScale_;
+    const float cardWidth = kCardWidth * s;
+
     StripLayout layout;
-    layout.card = D2D1::RectF(left, top, left + kCardWidth, top + height);
+    layout.card = D2D1::RectF(left, top, left + cardWidth, top + height);
 
-    const float cx0 = left + kCardPaddingX;
-    const float cx1 = left + kCardWidth - kCardPaddingX;
-    float y = top + kCardPaddingTop;
+    const float cx0 = left + kCardPaddingX * s;
+    const float cx1 = left + cardWidth - kCardPaddingX * s;
+    float y = top + kCardPaddingTop * s;
 
-    const float iconCenterX = left + kCardWidth / 2.0f;
-    layout.icon = D2D1::RectF(iconCenterX - kIconSize / 2.0f, y, iconCenterX + kIconSize / 2.0f, y + kIconSize);
-    y += kIconSize + kRowGap;
+    const float iconSize = kIconSize * s;
+    const float iconCenterX = left + cardWidth / 2.0f;
+    layout.icon = D2D1::RectF(iconCenterX - iconSize / 2.0f, y, iconCenterX + iconSize / 2.0f, y + iconSize);
+    y += iconSize + kRowGap * s;
 
+    const float faderWidth = 24.0f * s;
     const float faderTop = y;
-    const float faderBottom = faderTop + kFaderHeight;
-    fader.SetBounds(D2D1::RectF(left + (kCardWidth - 24.0f) / 2.0f, faderTop,
-                                 left + (kCardWidth + 24.0f) / 2.0f, faderBottom));
-    y = faderBottom + kRowGap;
+    const float faderBottom = faderTop + kFaderHeight * s;
+    fader.SetBounds(D2D1::RectF(left + (cardWidth - faderWidth) / 2.0f, faderTop,
+                                 left + (cardWidth + faderWidth) / 2.0f, faderBottom));
+    y = faderBottom + kRowGap * s;
 
-    layout.percentLabel = D2D1::RectF(cx0, y, cx1, y + kLabelHeight);
-    y += kLabelHeight + kRowGap;
+    const float labelHeight = kLabelHeight * s;
+    layout.percentLabel = D2D1::RectF(cx0, y, cx1, y + labelHeight);
+    y += labelHeight + kRowGap * s;
 
-    mute.SetBounds(D2D1::RectF(left + (kCardWidth - 30.0f) / 2.0f, y,
-                                left + (kCardWidth + 30.0f) / 2.0f, y + kMuteHeight));
-    y += kMuteHeight + kRowGap;
+    const float muteWidth = 30.0f * s;
+    const float muteHeight = kMuteHeight * s;
+    mute.SetBounds(D2D1::RectF(left + (cardWidth - muteWidth) / 2.0f, y,
+                                left + (cardWidth + muteWidth) / 2.0f, y + muteHeight));
+    y += muteHeight + kRowGap * s;
 
     if (outputCombo)
     {
-        outputCombo->SetBounds(D2D1::RectF(cx0, y, cx1, y + kComboHeight));
-        y += kComboHeight + kRowGap;
+        const float comboHeight = kComboHeight * s;
+        outputCombo->SetBounds(D2D1::RectF(cx0, y, cx1, y + comboHeight));
+        y += comboHeight + kRowGap * s;
     }
 
     if (meter)
     {
-        meter->SetBounds(D2D1::RectF(cx0, y, cx1, y + kMeterHeight));
-        y += kMeterHeight + kRowGap;
+        const float meterHeight = kMeterHeight * s;
+        meter->SetBounds(D2D1::RectF(cx0, y, cx1, y + meterHeight));
+        y += meterHeight + kRowGap * s;
     }
 
-    layout.nameLabel = D2D1::RectF(cx0, y, cx1, y + kNameHeight);
+    const float nameHeight = kNameHeight * s;
+    layout.nameLabel = D2D1::RectF(cx0, y, cx1, y + nameHeight);
 
     return layout;
 }
@@ -501,12 +569,14 @@ void MainWindow::Render()
 
     ctx->Clear(theme::kWindow);
 
+    const float margin = kMargin * dpiScale_;
+
     ctx->DrawText(L"Output", 6, labelFormat_.Get(),
-                  D2D1::RectF(kMargin, kMargin, kMargin + 50.0f, kMargin + 24.0f), subtleTextBrush_.Get());
+                  D2D1::RectF(margin, margin, margin + 50.0f * dpiScale_, margin + 24.0f * dpiScale_), subtleTextBrush_.Get());
     outputCombo_->Draw(ctx, comboFormat_.Get(), panelBrush_.Get(), borderBrush_.Get(), textBrush_.Get(), subtleTextBrush_.Get());
 
     ctx->DrawText(L"Input", 5, labelFormat_.Get(),
-                  D2D1::RectF(kMargin, kMargin + 32.0f, kMargin + 50.0f, kMargin + 56.0f), subtleTextBrush_.Get());
+                  D2D1::RectF(margin, margin + 32.0f * dpiScale_, margin + 50.0f * dpiScale_, margin + 56.0f * dpiScale_), subtleTextBrush_.Get());
     inputCombo_->Draw(ctx, comboFormat_.Get(), panelBrush_.Get(), borderBrush_.Get(), textBrush_.Get(), subtleTextBrush_.Get());
 
     RECT client;
@@ -654,10 +724,10 @@ void MainWindow::OnMouseWheel(int delta)
 {
     RECT client;
     GetClientRect(hwnd_, &client);
-    const float viewWidth = static_cast<float>(client.right - client.left) - 2.0f * kMargin;
+    const float viewWidth = static_cast<float>(client.right - client.left) - 2.0f * kMargin * dpiScale_;
 
     const float maxScroll = std::max(0.0f, contentWidth_ - viewWidth);
-    scrollOffsetX_ -= static_cast<float>(delta) / 120.0f * 60.0f;
+    scrollOffsetX_ -= static_cast<float>(delta) / 120.0f * 60.0f * dpiScale_;
     scrollOffsetX_ = std::clamp(scrollOffsetX_, 0.0f, maxScroll);
 
     Layout();
