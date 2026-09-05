@@ -27,6 +27,7 @@ target_compile_definitions(winmix_app PRIVATE
 )
 
 target_link_libraries(winmix_app PRIVATE
+    winmix_audio
     user32
     gdi32
     d3d11

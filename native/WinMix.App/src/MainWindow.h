@@ -15,19 +15,9 @@
 #include "controls/MuteToggle.h"
 #include "controls/ComboBox.h"
 
-namespace winmix::app {
+#include "winmix/audio/AudioSessionService.h"
 
-// One fake channel strip's data, standing in for a real
-// winmix::audio::AudioSessionSnapshot until stage 3 wires the real engine
-// into this poll-and-draw loop.
-struct FakeSession
-{
-    std::wstring name;
-    double volume = 0.5;
-    bool muted = false;
-    float peak = 0.0f;
-    bool active = true;
-};
+namespace winmix::app {
 
 // Precomputed per-frame geometry for one channel strip's non-control
 // elements (card background, icon placeholder, text labels), filled by
@@ -40,13 +30,20 @@ struct StripLayout
     D2D1_RECT_F nameLabel{};
 };
 
+// One app's channel strip. Keyed by instanceId (matching
+// AudioSessionSnapshot::instanceId) across polls -- two windows of the same
+// app share a session identifier but get distinct instance ids, which is
+// exactly why this, not the display name or pid, is the reconciliation key.
 struct ChannelStrip
 {
+    std::wstring instanceId;
+    std::wstring name;
+    bool active = false;
+
     controls::FaderControl fader;
     controls::MuteToggle mute;
     controls::PeakMeter meter;
     std::unique_ptr<controls::ComboBox> outputCombo;
-    FakeSession data;
     StripLayout layout;
 };
 
@@ -82,6 +79,19 @@ private:
     void OnLButtonUp(POINT pt);
     void OnMouseWheel(int delta);
 
+    // Poll-loop plumbing (WM_TIMER-driven, ~100ms -- see AudioSessionService's
+    // own threading contract). Discovery is poll-based, not event-based, for
+    // the same reason the .NET version is: WASAPI's session-notification
+    // callbacks arrive off-thread and re-entering the session manager from
+    // one deadlocks.
+    void Poll();
+    void SyncMaster();
+    void SyncOutputDevices();
+    void SyncInputDevices();
+    void ReconcileSessions(const std::vector<winmix::audio::AudioSessionSnapshot>& snapshots);
+    void SyncStrip(ChannelStrip& strip, const winmix::audio::AudioSessionSnapshot& snapshot);
+    ChannelStrip CreateStrip(const winmix::audio::AudioSessionSnapshot& snapshot);
+
     HWND hwnd_ = nullptr;
     std::unique_ptr<render::DeviceResources> resources_;
 
@@ -99,6 +109,8 @@ private:
     Microsoft::WRL::ComPtr<IDWriteTextFormat> labelFormat_;
     Microsoft::WRL::ComPtr<IDWriteTextFormat> nameFormat_;
     Microsoft::WRL::ComPtr<IDWriteTextFormat> comboFormat_;
+
+    winmix::audio::AudioSessionService audioService_;
 
     controls::FaderControl masterFader_;
     controls::MuteToggle masterMute_;

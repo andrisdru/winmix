@@ -1,14 +1,19 @@
 #include "MainWindow.h"
 #include "Theme.h"
 
+#include "winmix/audio/VolumeCurve.h"
+
 #include <windowsx.h>
 
 #include <algorithm>
 #include <cmath>
 #include <cwctype>
 #include <stdexcept>
+#include <unordered_map>
+#include <unordered_set>
 
 using Microsoft::WRL::ComPtr;
+using winmix::audio::VolumeCurve;
 
 namespace winmix::app {
 
@@ -31,6 +36,18 @@ constexpr float kComboHeight = 22.0f;
 constexpr float kMeterHeight = 3.0f;
 constexpr float kNameHeight = 18.0f;
 constexpr float kRowGap = 6.0f;
+
+// Fast enough that the peak meters read as continuous, slow enough that
+// re-enumerating sessions stays free -- matches the .NET version's poll
+// interval exactly.
+constexpr UINT_PTR kPollTimerId = 1;
+constexpr UINT kPollIntervalMs = 100;
+
+// How far the device's reported scalar may drift from what the fader
+// implies before it's treated as a genuine external change. WASAPI
+// quantizes what it stores, so a strict comparison would never match and
+// every poll would yank the fader out from under a live drag.
+constexpr float kScalarEpsilon = 0.01f;
 
 } // namespace
 
@@ -59,47 +76,48 @@ MainWindow::MainWindow(HINSTANCE hInstance)
     CreateTextFormats();
 
     outputCombo_ = std::make_unique<controls::ComboBox>(hwnd_);
-    outputCombo_->SetItems({L"Speakers (Realtek Audio)", L"Headphones (USB)"});
-    outputCombo_->SetSelectedIndex(0);
-
     inputCombo_ = std::make_unique<controls::ComboBox>(hwnd_);
-    inputCombo_->SetItems({L"Microphone Array", L"USB Microphone"});
-    inputCombo_->SetSelectedIndex(0);
+    // Device-switching (both boxes) lands in a later stage alongside
+    // PolicyConfigInterop; for now they display real devices but selecting
+    // one has no effect. Real items are populated by the first Poll() below.
 
-    masterFader_.SetValue(0.8);
-
-    const std::vector<std::wstring> fakeNames = {
-        L"Google Chrome", L"Spotify", L"Discord", L"Visual Studio",
-        L"Windows Explorer", L"Steam", L"System sounds", L"VLC media player",
+    // User-driven only -- SetValue() (used when a poll adopts the device's
+    // own value) deliberately does not invoke onChange, so there is no risk
+    // of a poll echoing straight back into a WASAPI write.
+    masterFader_.onChange = [this](double position)
+    {
+        try
+        {
+            audioService_.SetMasterVolume(VolumeCurve::ToScalar(position));
+        }
+        catch (const std::exception&)
+        {
+            // The default endpoint vanished mid-gesture; the next poll
+            // reflects reality.
+        }
+    };
+    masterMute_.onChange = [this](bool muted)
+    {
+        try
+        {
+            audioService_.SetMasterMuted(muted);
+        }
+        catch (const std::exception&)
+        {
+        }
     };
 
-    for (size_t i = 0; i < fakeNames.size(); ++i)
-    {
-        ChannelStrip strip;
-        strip.data.name = fakeNames[i];
-        strip.data.volume = 0.3 + 0.08 * static_cast<double>(i % 6);
-        strip.data.muted = (i == 2);
-        strip.data.peak = (i % 3 == 0) ? 0.35f : 0.0f;
-        strip.data.active = (i % 3 != 1);
-
-        strip.fader.SetValue(strip.data.volume);
-        strip.mute.SetMuted(strip.data.muted);
-        strip.meter.SetLevel(strip.data.peak);
-
-        strip.outputCombo = std::make_unique<controls::ComboBox>(hwnd_);
-        strip.outputCombo->SetItems({L"Default", L"Speakers (Realtek Audio)", L"Headphones (USB)"});
-        strip.outputCombo->SetSelectedIndex(0);
-
-        strips_.push_back(std::move(strip));
-    }
-
+    Poll();
     Layout();
+
+    SetTimer(hwnd_, kPollTimerId, kPollIntervalMs, nullptr);
 }
 
 MainWindow::~MainWindow()
 {
     if (hwnd_)
     {
+        KillTimer(hwnd_, kPollTimerId);
         DestroyWindow(hwnd_);
     }
 }
@@ -180,6 +198,15 @@ LRESULT MainWindow::WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam)
 
     case WM_MOUSEWHEEL:
         OnMouseWheel(GET_WHEEL_DELTA_WPARAM(wParam));
+        return 0;
+
+    case WM_TIMER:
+        if (wParam == kPollTimerId)
+        {
+            Poll();
+            Layout();
+            InvalidateRect(hwnd, nullptr, FALSE);
+        }
         return 0;
 
     case WM_ERASEBKGND:
@@ -332,7 +359,7 @@ void MainWindow::Render()
     for (auto& strip : strips_)
     {
         DrawStrip(strip.layout, strip.fader, strip.mute, &strip.meter, strip.outputCombo.get(),
-                  strip.data.name, strip.data.active);
+                  strip.name, strip.active);
     }
 
     ctx->PopAxisAlignedClip();
@@ -458,6 +485,175 @@ void MainWindow::OnMouseWheel(int delta)
 
     Layout();
     InvalidateRect(hwnd_, nullptr, FALSE);
+}
+
+void MainWindow::Poll()
+{
+    try
+    {
+        const auto snapshots = audioService_.Refresh();
+        SyncMaster();
+        SyncOutputDevices();
+        SyncInputDevices();
+        ReconcileSessions(snapshots);
+    }
+    catch (const std::exception&)
+    {
+        // Typically no active render endpoint at all; leave the last known
+        // state on screen rather than tearing down the poll loop over it.
+    }
+}
+
+void MainWindow::SyncMaster()
+{
+    const float deviceScalar = audioService_.GetMasterVolume();
+    const float currentScalar = VolumeCurve::ToScalar(masterFader_.Value());
+    if (std::abs(currentScalar - deviceScalar) > kScalarEpsilon)
+    {
+        masterFader_.SetValue(VolumeCurve::ToPosition(deviceScalar));
+    }
+
+    masterMute_.SetMuted(audioService_.GetMasterMuted());
+}
+
+void MainWindow::SyncOutputDevices()
+{
+    // Skip while open: replacing the item list out from under an
+    // in-progress click would be jarring, and it costs nothing to pick it
+    // up on the next tick once the user closes it.
+    if (outputCombo_->IsOpen())
+    {
+        return;
+    }
+
+    const auto devices = audioService_.ListOutputDevices();
+    std::vector<std::wstring> items;
+    items.reserve(devices.size());
+    int defaultIndex = 0;
+    for (size_t i = 0; i < devices.size(); ++i)
+    {
+        items.push_back(devices[i].friendlyName);
+        if (devices[i].isDefault)
+        {
+            defaultIndex = static_cast<int>(i);
+        }
+    }
+
+    outputCombo_->SetItems(std::move(items));
+    outputCombo_->SetSelectedIndex(defaultIndex);
+}
+
+void MainWindow::SyncInputDevices()
+{
+    if (inputCombo_->IsOpen())
+    {
+        return;
+    }
+
+    const auto devices = audioService_.ListInputDevices();
+    std::vector<std::wstring> items;
+    items.reserve(devices.size());
+    int defaultIndex = 0;
+    for (size_t i = 0; i < devices.size(); ++i)
+    {
+        items.push_back(devices[i].friendlyName);
+        if (devices[i].isDefault)
+        {
+            defaultIndex = static_cast<int>(i);
+        }
+    }
+
+    inputCombo_->SetItems(std::move(items));
+    inputCombo_->SetSelectedIndex(defaultIndex);
+}
+
+void MainWindow::ReconcileSessions(const std::vector<winmix::audio::AudioSessionSnapshot>& snapshots)
+{
+    std::unordered_set<std::wstring> incomingIds;
+    incomingIds.reserve(snapshots.size());
+    for (const auto& s : snapshots)
+    {
+        incomingIds.insert(s.instanceId);
+    }
+
+    for (auto it = strips_.begin(); it != strips_.end();)
+    {
+        if (!incomingIds.contains(it->instanceId))
+        {
+            it = strips_.erase(it);
+        }
+        else
+        {
+            ++it;
+        }
+    }
+
+    // Reserved so every pointer taken into `present` below survives every
+    // push_back in this call. New rows go on the end (arrival order), never
+    // resorted -- re-sorting live would make cards jump around every time an
+    // app starts or stops producing sound.
+    strips_.reserve(snapshots.size());
+
+    std::unordered_map<std::wstring, ChannelStrip*> present;
+    present.reserve(strips_.size());
+    for (auto& strip : strips_)
+    {
+        present[strip.instanceId] = &strip;
+    }
+
+    for (const auto& snapshot : snapshots)
+    {
+        auto it = present.find(snapshot.instanceId);
+        if (it != present.end())
+        {
+            SyncStrip(*it->second, snapshot);
+        }
+        else
+        {
+            strips_.push_back(CreateStrip(snapshot));
+        }
+    }
+}
+
+void MainWindow::SyncStrip(ChannelStrip& strip, const winmix::audio::AudioSessionSnapshot& snapshot)
+{
+    strip.name = snapshot.displayName;
+    strip.active = snapshot.IsActive();
+    strip.meter.SetLevel(snapshot.peakLevel);
+    strip.mute.SetMuted(snapshot.isMuted);
+
+    const float currentScalar = VolumeCurve::ToScalar(strip.fader.Value());
+    if (std::abs(currentScalar - snapshot.volume) > kScalarEpsilon)
+    {
+        strip.fader.SetValue(VolumeCurve::ToPosition(snapshot.volume));
+    }
+}
+
+ChannelStrip MainWindow::CreateStrip(const winmix::audio::AudioSessionSnapshot& snapshot)
+{
+    ChannelStrip strip;
+    strip.instanceId = snapshot.instanceId;
+    strip.name = snapshot.displayName;
+    strip.active = snapshot.IsActive();
+    strip.fader.SetValue(VolumeCurve::ToPosition(snapshot.volume));
+    strip.mute.SetMuted(snapshot.isMuted);
+    strip.meter.SetLevel(snapshot.peakLevel);
+
+    strip.outputCombo = std::make_unique<controls::ComboBox>(hwnd_);
+    strip.outputCombo->SetItems({L"Default"}); // per-app routing lands with AppOutputRouter later
+    strip.outputCombo->SetSelectedIndex(0);
+
+    const std::wstring instanceId = strip.instanceId;
+    strip.fader.onChange = [this, instanceId](double position)
+    {
+        audioService_.SetVolume(instanceId, VolumeCurve::ToScalar(position));
+    };
+    strip.mute.onChange = [this, instanceId](bool muted)
+    {
+        audioService_.SetMute(instanceId, muted);
+    };
+
+    return strip;
 }
 
 } // namespace winmix::app
