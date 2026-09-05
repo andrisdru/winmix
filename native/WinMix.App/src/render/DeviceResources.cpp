@@ -95,19 +95,30 @@ void DeviceResources::CreateWindowSizeDependentResources()
     ComPtr<IDXGISurface> surface;
     ThrowIfFailed(swapChain_->GetBuffer(0, IID_PPV_ARGS(&surface)), "GetBuffer");
 
-    const float dpi = static_cast<float>(GetDpiForWindow(hwnd_));
+    // Deliberately 96 (the DIP baseline), not GetDpiForWindow(): every
+    // coordinate this app hands to D2D (layout constants, mouse-derived
+    // hit-test rects) is already a raw physical pixel value, since nothing
+    // else in this codebase scales by the monitor's DPI. Passing the real
+    // per-monitor DPI here would make D2D treat those same numbers as DIPs
+    // and scale them up again on top (1.5x at 144 DPI) -- rendering would
+    // drift further from the hit-test rects the higher the display's scale
+    // factor, while mouse coordinates (always true physical pixels for a
+    // per-monitor-DPI-aware window) stay unscaled. Pinning both the bitmap
+    // and the context to 96 keeps DIPs and physical pixels identical, so
+    // rendering and hit-testing agree everywhere, at every DPI.
+    constexpr float kDip = 96.0f;
 
     const D2D1_BITMAP_PROPERTIES1 props = D2D1::BitmapProperties1(
         D2D1_BITMAP_OPTIONS_TARGET | D2D1_BITMAP_OPTIONS_CANNOT_DRAW,
         D2D1::PixelFormat(DXGI_FORMAT_B8G8R8A8_UNORM, D2D1_ALPHA_MODE_IGNORE),
-        dpi, dpi);
+        kDip, kDip);
 
     ThrowIfFailed(
         d2dContext_->CreateBitmapFromDxgiSurface(surface.Get(), &props, &targetBitmap_),
         "CreateBitmapFromDxgiSurface");
 
     d2dContext_->SetTarget(targetBitmap_.Get());
-    d2dContext_->SetDpi(dpi, dpi);
+    d2dContext_->SetDpi(kDip, kDip);
 }
 
 void DeviceResources::Resize(UINT width, UINT height)
