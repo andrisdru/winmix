@@ -39,6 +39,20 @@ constexpr float kMeterHeight = 3.0f;
 constexpr float kNameHeight = 18.0f;
 constexpr float kRowGap = 6.0f;
 
+// Vertical space LayoutStrip actually consumes for one full per-app card
+// (the tallest strip variant -- it's the only one with both the output
+// combo and the peak meter) at scale 1. kMinHeight below is derived from
+// this rather than a separate magic number, so the two can never drift
+// apart and silently clip the last row again.
+constexpr float kStripContentHeight =
+    kCardPaddingTop + kIconSize + kRowGap +
+    kFaderHeight + kRowGap +
+    kLabelHeight + kRowGap +
+    kMuteHeight + kRowGap +
+    kComboHeight + kRowGap +
+    kMeterHeight + kRowGap +
+    kNameHeight;
+
 // Fast enough that the peak meters read as continuous, slow enough that
 // re-enumerating sessions stays free -- matches the .NET version's poll
 // interval exactly.
@@ -52,12 +66,29 @@ constexpr UINT kPollIntervalMs = 100;
 constexpr float kScalarEpsilon = 0.01f;
 
 // Content-driven width, capped in WM_GETMINMAXINFO; height stays freely
-// resizable (see WM_NCHITTEST below).
+// resizable (see WM_NCHITTEST below), but never below what one full strip
+// needs, or the bottom row (the name label) clips against the window edge.
 constexpr LONG kMinWidth = 300;
-constexpr LONG kMinHeight = 360;
+constexpr LONG kMinHeight = static_cast<LONG>(kHeaderHeight + kStripContentHeight + 2.0f * kMargin);
 constexpr LONG kMaxWidthMargin = 60;
 
 constexpr UINT kTrayCallbackMessage = WM_APP + 1;
+
+// Without this, a format with no-wrap + DRAW_TEXT_OPTIONS_CLIP just hard-cuts
+// whatever doesn't fit at the layout rect's edge -- for LEADING alignment
+// that reads as a word chopped off mid-letter ("Defa" for "Default"), and for
+// CENTER alignment (the per-strip name label) it clips *both* ends at once,
+// showing a garbled slice from the middle of the string. This appends "..."
+// via DirectWrite's own trimming instead, matching the .NET version's
+// TextTrimming=CharacterEllipsis.
+void ApplyEllipsisTrimming(IDWriteFactory* dwrite, IDWriteTextFormat* format)
+{
+    Microsoft::WRL::ComPtr<IDWriteInlineObject> ellipsis;
+    dwrite->CreateEllipsisTrimmingSign(format, &ellipsis);
+    DWRITE_TRIMMING trimming{};
+    trimming.granularity = DWRITE_TRIMMING_GRANULARITY_CHARACTER;
+    format->SetTrimming(&trimming, ellipsis.Get());
+}
 
 } // namespace
 
@@ -71,9 +102,22 @@ MainWindow::MainWindow(HINSTANCE hInstance)
     wc.hCursor = LoadCursorW(nullptr, IDC_ARROW);
     RegisterClassExW(&wc);
 
+    // CreateWindowExW's width/height are literal physical pixels -- unlike
+    // WPF, where a Height="480" window is DIP units the framework scales to
+    // the monitor automatically, Win32 applies no such scaling. Without this,
+    // the window comes up at a literal 620x480 on a 150%-scaled display while
+    // its own content (scaled by dpiScale_ in Layout()) needs ~1.5x that,
+    // clipping the bottom row. dpiScale_ itself needs an hwnd to compute
+    // (GetDpiForWindow), so this uses the system DPI as the best available
+    // guess before one exists; WM_DPICHANGED corrects it if the window ends
+    // up on a different-DPI monitor than assumed here.
+    const float initialScale = static_cast<float>(GetDpiForSystem()) / 96.0f;
+    const int initialWidth = static_cast<int>(std::lround(620.0f * initialScale));
+    const int initialHeight = static_cast<int>(std::lround(480.0f * initialScale));
+
     hwnd_ = CreateWindowExW(
         0, kClassName, kWindowTitle, WS_OVERLAPPEDWINDOW,
-        CW_USEDEFAULT, CW_USEDEFAULT, 620, 480,
+        CW_USEDEFAULT, CW_USEDEFAULT, initialWidth, initialHeight,
         nullptr, nullptr, hInstance, this);
 
     if (!hwnd_)
@@ -457,12 +501,14 @@ void MainWindow::CreateTextFormats()
     nameFormat_->SetTextAlignment(DWRITE_TEXT_ALIGNMENT_CENTER);
     nameFormat_->SetParagraphAlignment(DWRITE_PARAGRAPH_ALIGNMENT_NEAR);
     nameFormat_->SetWordWrapping(DWRITE_WORD_WRAPPING_NO_WRAP);
+    ApplyEllipsisTrimming(dwrite, nameFormat_.Get());
 
     dwrite->CreateTextFormat(L"Segoe UI", nullptr, DWRITE_FONT_WEIGHT_NORMAL, DWRITE_FONT_STYLE_NORMAL,
                               DWRITE_FONT_STRETCH_NORMAL, comboSize, L"en-us", &comboFormat_);
     comboFormat_->SetTextAlignment(DWRITE_TEXT_ALIGNMENT_LEADING);
     comboFormat_->SetParagraphAlignment(DWRITE_PARAGRAPH_ALIGNMENT_CENTER);
     comboFormat_->SetWordWrapping(DWRITE_WORD_WRAPPING_NO_WRAP);
+    ApplyEllipsisTrimming(dwrite, comboFormat_.Get());
 }
 
 void MainWindow::Layout()
