@@ -35,6 +35,8 @@ public:
     std::function<void()> onExit;
     std::function<std::vector<TrayInputDevice>()> listInputDevices;
     std::function<void(const std::wstring&)> setDefaultInputDevice;
+    std::function<bool()> isAutostartEnabled;
+    std::function<void(bool)> setAutostartEnabled;
 
 private:
     void ShowContextMenu();

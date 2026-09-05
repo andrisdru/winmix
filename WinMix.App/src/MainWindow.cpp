@@ -1,4 +1,5 @@
 #include "MainWindow.h"
+#include "Autostart.h"
 #include "Theme.h"
 #include "resource.h"
 
@@ -168,6 +169,8 @@ MainWindow::MainWindow(HINSTANCE hInstance)
         {
         }
     };
+    tray_->isAutostartEnabled = []() { return Autostart::IsEnabled(); };
+    tray_->setAutostartEnabled = [](bool enabled) { Autostart::SetEnabled(enabled); };
 
     outputCombo_ = std::make_unique<controls::ComboBox>(hwnd_);
     outputCombo_->onChange = [this](int index)

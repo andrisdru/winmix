@@ -3,6 +3,7 @@ add_executable(winmix_app WIN32
     src/MainWindow.cpp
     src/TrayIcon.cpp
     src/IconLoader.cpp
+    src/Autostart.cpp
     src/render/DeviceResources.cpp
     src/controls/FaderControl.cpp
     src/controls/PeakMeter.cpp
@@ -40,6 +41,7 @@ target_link_libraries(winmix_app PRIVATE
     user32
     gdi32
     shell32
+    advapi32
     dwmapi
     d3d11
     dxgi

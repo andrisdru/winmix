@@ -7,6 +7,7 @@ namespace winmix::app {
 namespace {
 constexpr UINT_PTR kMenuOpenId = 1;
 constexpr UINT_PTR kMenuExitId = 2;
+constexpr UINT_PTR kMenuAutostartId = 3;
 constexpr UINT_PTR kMenuInputDeviceBase = 100; // + index into the current device list
 } // namespace
 
@@ -77,6 +78,9 @@ void TrayIcon::ShowContextMenu()
         DestroyMenu(inputMenu);
     }
 
+    const bool autostartEnabled = isAutostartEnabled && isAutostartEnabled();
+    AppendMenuW(menu, MF_STRING | (autostartEnabled ? MF_CHECKED : 0u), kMenuAutostartId, L"Start with Windows");
+
     AppendMenuW(menu, MF_SEPARATOR, 0, nullptr);
     AppendMenuW(menu, MF_STRING, kMenuExitId, L"Exit");
 
@@ -103,6 +107,13 @@ void TrayIcon::ShowContextMenu()
         if (onExit)
         {
             onExit();
+        }
+    }
+    else if (selected == static_cast<int>(kMenuAutostartId))
+    {
+        if (setAutostartEnabled)
+        {
+            setAutostartEnabled(!autostartEnabled);
         }
     }
     else if (selected >= static_cast<int>(kMenuInputDeviceBase))
