@@ -1,7 +1,19 @@
-add_executable(winmix_app WIN32 src/WinMain.cpp)
+add_executable(winmix_app WIN32
+    src/WinMain.cpp
+    src/MainWindow.cpp
+    src/render/DeviceResources.cpp
+    src/controls/FaderControl.cpp
+    src/controls/PeakMeter.cpp
+    src/controls/MuteToggle.cpp
+    src/controls/ComboBox.cpp
+)
 
 set_target_properties(winmix_app PROPERTIES
     OUTPUT_NAME "WinMixCpp"
+)
+
+target_include_directories(winmix_app PRIVATE
+    ${CMAKE_CURRENT_SOURCE_DIR}/src
 )
 
 target_compile_definitions(winmix_app PRIVATE
@@ -17,4 +29,8 @@ target_compile_definitions(winmix_app PRIVATE
 target_link_libraries(winmix_app PRIVATE
     user32
     gdi32
+    d3d11
+    dxgi
+    d2d1
+    dwrite
 )
