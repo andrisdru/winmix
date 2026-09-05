@@ -78,7 +78,7 @@ public:
     MainWindow(const MainWindow&) = delete;
     MainWindow& operator=(const MainWindow&) = delete;
 
-    void Show(int cmdShow);
+    void Show(int cmdShow, bool startMinimized = false);
     int RunMessageLoop();
 
 private:

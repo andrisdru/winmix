@@ -256,8 +256,19 @@ MainWindow::~MainWindow()
     }
 }
 
-void MainWindow::Show(int cmdShow)
+void MainWindow::Show(int cmdShow, bool startMinimized)
 {
+    if (startMinimized)
+    {
+        // Launched via the "Start with Windows" autostart entry (see
+        // Autostart.cpp/WinMain.cpp's --minimized flag) -- stay tray-only
+        // until the user opens the mixer themselves, the same hidden,
+        // not-polling state WM_CLOSE already leaves it in. Starting the
+        // poll loop now would just burn COM traffic on a window nobody
+        // has asked to see yet.
+        return;
+    }
+
     // Populate real sessions and let Layout() size the window to them
     // (SyncWindowWidthToContent) before the window is ever visible, rather
     // than showing it at the placeholder width and then visibly popping to
