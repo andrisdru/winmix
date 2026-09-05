@@ -57,27 +57,79 @@ Closing the window only hides it. Exit lives in the tray context menu.
 Three CMake targets at the repo root, and the split is load-bearing:
 
 - **`WinMix.Audio`** (static lib) — all Core Audio/WASAPI interaction via
-  raw COM (`Microsoft::WRL::ComPtr`, no wrapper library). No UI types, no
-  Win32 window/message-loop code, so it stays independently testable.
+  raw COM (`Microsoft::WRL::ComPtr`, no wrapper library), plus the per-app
+  identity/routing logic built on top of it (`AppSessionTracker`,
+  `AppDeviceRouter`/`AppOutputRouter`). No UI types, no Win32 window/
+  message-loop code, so it stays independently testable.
 - **`WinMix.App`** (exe) — the Win32 shell: `WinMain`, the message loop,
   Direct2D/DirectWrite rendering, custom controls (`FaderControl`,
-  `MuteToggle`, `PeakMeter`, `ComboBox`), the tray icon.
+  `MuteToggle`, `PeakMeter`, `ComboBox`), `DeviceLabels` (shortens/dedupes
+  device names for the per-strip pickers), the tray icon.
 - **`tests/`** — doctest against `winmix_audio`, run via `enable_testing()`.
-- **`tools/AudioSmokeTest`** — a throwaway console exe that polls sessions
-  once a second and prints name/volume/mute/peak, for verifying the audio
-  layer against real playback without the UI. `WINMIX_BUILD_TOOLS`/
-  `WINMIX_BUILD_TESTS` CMake options (default `ON`) turn both off for
-  `x64-package`.
+- **`tools/AudioSmokeTest`** — a console tool for verifying the audio layer
+  against real playback without the UI. Default mode polls sessions once a
+  second, printing name/volume/mute/peak plus stream count and resolved
+  output device; `--once` polls a single time; `--test-routing` exercises
+  `AppOutputRouter` Set/Get readback on every output device using only the
+  test process itself; `--test-app-routing <pid> <device-index>` verifies a
+  real playing app's stream actually migrates, restoring its original
+  preference afterward either way. `WINMIX_BUILD_TOOLS`/`WINMIX_BUILD_TESTS`
+  CMake options (default `ON`) turn both off for `x64-package`.
 
 ### Snapshots, not live COM objects
 
 [AudioSessionService::Refresh()](WinMix.Audio/src/AudioSessionService.cpp)
 returns immutable `AudioSessionSnapshot` values and keeps the live
 `IAudioSessionControl2`/`ISimpleAudioVolume` COM pointers private, keyed by
-session instance ID. Each `Refresh()` releases the previous batch of
-`ComPtr`s before re-enumerating — skipping that would leak COM references
-steadily. Mutations go back through `SetVolume(instanceId, …)` /
-`SetMute(instanceId, …)`, never by holding a pointer across a refresh.
+raw WASAPI session instance ID in `controls_`. Each `Refresh()` releases the
+previous batch of `ComPtr`s before re-enumerating — skipping that would leak
+COM references steadily. `SetVolume`/`SetMute` accept either a raw instance
+ID or the stable app key described below and resolve it to the right
+control(s) internally; callers never hold a pointer across a refresh.
+
+### One row per app, not per WASAPI session
+
+Windows tears down and recreates an app's `IAudioSessionControl2` — with a
+brand-new session instance ID — on a device switch (and on some apps, even
+a mute toggle), even though it's the same running app to the user.
+[AppSessionTracker](WinMix.Audio/src/AppSessionTracker.cpp) absorbs this: it
+groups the raw per-device sessions `Refresh()` enumerates into one stable
+snapshot per app. `AudioSessionSnapshot::instanceId` on that grouped result
+is a stable app key, not a raw session ID — `sessionInstanceIds`/`processIds`
+list whatever raw sessions/PIDs currently back it — and a just-vanished app
+is kept around briefly rather than dropped immediately, to survive the gap
+while Windows recreates its stream. `MainWindow::ReconcileSessions` keys
+`strips_` by this same app key for the same reason: keying by raw session ID
+would delete and re-append the card on every device switch instead of
+updating it in place.
+
+`AudioSessionService`'s `ControlTransfer` mechanism solves the matching
+volume/mute problem: each render endpoint remembers its own independent
+volume/mute for a given app, so switching a pinned app to a new device would
+otherwise silently reset both. `SetAppOutputDevice(appId, …)` snapshots the
+app's current volume/mute, applies it to every existing session (including
+idle ones) up front, and keeps re-applying it to any newly created
+replacement session for 3 seconds after the switch — long enough to catch
+the stream Windows recreates on the new device.
+
+`strips_` is a `std::list<ChannelStrip>`, not a `std::vector`, for the same
+session-churn reason: inserting or erasing a row (an app arrives or closes)
+must never invalidate a `ChannelStrip*`/iterator that a fader still mid-drag,
+or an `onChange` closure, is holding onto.
+
+### Telling the user when a switch didn't take
+
+Some apps hold one long-lived stream open and only re-resolve their
+output/input device the next time they open a new one (see the README) —
+`SetAppOutputDevice`/`SetAppInputDevice` succeeds at the Windows-registry
+level immediately, but the audio itself keeps flowing through the old
+device until the app reopens its stream on its own. Each `ChannelStrip`
+tracks `routeRequestedAt`/`routeWarningPending` (and the `input*`
+equivalents): if `activeOutputDeviceIds`/`activeInputDeviceIds` still don't
+include the requested device 3 seconds after a switch, `MainWindow` posts
+`kRouteWarningMessage` and shows a `MessageBoxW` explaining that the app's
+own output/input setting needs to be "System Default" for WinMix's pin to
+take effect.
 
 ### Polling, not notifications
 
@@ -134,23 +186,51 @@ for anything more elevated than us. It must keep trimming stale pids each
 refresh, since Windows recycles them and a stale entry would mislabel a new
 session.
 
+### Per-strip device pickers show compact, deduped labels
+
+Each strip's output/input combo lists full WASAPI device names (e.g.
+"Speakers (SMSL USB DAC)"), which get wide and repetitive once every app has
+its own picker. [DeviceLabels](WinMix.App/src/DeviceLabels.cpp) strips the
+generic "Speakers (…)"/"Microphone (…)" wrapper and registered-trademark
+marks, but falls back to the untouched full name for any device whose short
+form would otherwise collide with another (appending a `[2]`-style ordinal
+if they're still identical after that). `ComboBox` shows the full original
+name as a hover tooltip (`comctl32`'s `TTM_*` messages, `InitCommonControlsEx`
+in `ComboBox.cpp`) so the compacted label is never the only way to tell two
+devices apart.
+
 ### The two undocumented COM interop shims
 
 - [AudioPolicyConfigFactory](WinMix.Audio/src/AudioPolicyConfigFactory.cpp)
-  and [PolicyConfigInterop](WinMix.Audio/src/PolicyConfigInterop.cpp)
-  are hand-declared `IInspectable`/`IUnknown`-derived vtable structs for
-  undocumented Windows interfaces — there is no header for either. The
-  vtable slot counts must be exact: a past bug here (fixed) had 9 leading
+  (per-app persisted default endpoint —
+  `Set`/`GetPersistedDefaultAudioEndpoint`) and
+  [PolicyConfigInterop](WinMix.Audio/src/PolicyConfigInterop.cpp)
+  (system-wide default endpoint — `SetDefaultEndpoint`) are hand-declared
+  `IInspectable`/`IUnknown`-derived vtable structs for undocumented Windows
+  interfaces — there is no header for either. The vtable slot counts must be
+  exact: a past bug here (fixed, in `PolicyConfigInterop`) had 9 leading
   placeholder slots before `SetDefaultEndpoint` when 10 are needed (a
   missing `ResetDeviceFormat`), which doesn't fail to compile — it silently
   calls the wrong method and segfaults or corrupts state at runtime. If you
   touch either file, verify slot counts against an independent reference
   (e.g. EarTrumpet, SoundSwitch), not just by re-reading the existing code.
+  A new method may only ever be *appended* after the last real slot
+  (`GetPersistedDefaultAudioEndpoint` was added this way, right after
+  `SetPersistedDefaultAudioEndpoint`) — never inserted or reordered, or
+  every slot after it silently calls the wrong method.
 - `AudioPolicyConfigFactory`'s class IID branches on the OS build number
   (`AB3D4648-…` for build ≥ 21390, else `2A59116D-…`), which depends on the
   manifest's `<supportedOS>` Windows-10 GUID being present — without it, a
   compatibility shim reports a stale build number and picks the wrong
   branch.
+- [AppDeviceRouter](WinMix.Audio/src/AppDeviceRouter.cpp) is the actual
+  per-app routing entry point for both render and capture — it packs/unpacks
+  the `\\?\SWD#MMDEVAPI#{id}#{role-GUID}` device-interface-path HSTRING
+  `AudioPolicyConfigFactory` expects (`IMMDevice::GetId()` returns only the
+  middle `{id}` portion), setting Console+Multimedia for render and
+  additionally Communications for capture. `AppOutputRouter` is now just a
+  render-only, thinner-named wrapper around it, kept for its call sites'
+  readability.
 
 ## DPI and layout (the part most recently debugged)
 
@@ -233,6 +313,14 @@ No UI test harness exists. To confirm a change actually rendered correctly:
   through `GetIconInfo` → select `hbmColor`/`hbmMask` into a memory DC →
   `GetDIBits` into a top-down 32bpp BGRA buffer → `CreateBitmap`, with a
   legacy AND-mask fallback when there's no per-pixel alpha.
+- **Editing `VERSION` alone doesn't trigger a CMake reconfigure by default.**
+  The top-level `CMakeLists.txt` reads `VERSION` into `PROJECT_VERSION` and
+  adds it to `CMAKE_CONFIGURE_DEPENDS` explicitly; without that,
+  `cmake --build` only reruns configure when `CMakeLists.txt` itself
+  changes, so `PROJECT_VERSION` and the generated `WinMix.App/generated/
+  Version.h` (which the title bar, tray tooltip, and tray menu all read)
+  would keep silently serving the old number. Use the `/app-version` skill
+  rather than hand-editing `VERSION`.
 
 ## Seeing the app
 

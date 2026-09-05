@@ -6,6 +6,7 @@
 #include <dwrite.h>
 
 #include <memory>
+#include <list>
 #include <optional>
 #include <string>
 #include <vector>
@@ -31,18 +32,26 @@ struct StripLayout
     D2D1_RECT_F icon{};
     D2D1_RECT_F percentLabel{};
     D2D1_RECT_F nameLabel{};
+    D2D1_RECT_F outputLabel{};
+    D2D1_RECT_F inputLabel{};
 };
 
-// One app's channel strip. Keyed by instanceId (matching
-// AudioSessionSnapshot::instanceId) across polls -- two windows of the same
-// app share a session identifier but get distinct instance ids, which is
-// exactly why this, not the display name or pid, is the reconciliation key.
+// One app control, retained across endpoint and worker-process changes.
 struct ChannelStrip
 {
+    // Callbacks resolve this stable identity instead of capturing a row address.
+    uint64_t rowId = 0;
     std::wstring instanceId;
     uint32_t pid = 0;
     std::wstring name;
     bool active = false;
+    bool hasOutputSession = true;
+    std::optional<std::wstring> outputDeviceId;
+    uint64_t routeRequestedAt = 0;
+    bool routeWarningPending = false;
+    std::optional<std::wstring> inputDeviceId;
+    uint64_t inputRouteRequestedAt = 0;
+    bool inputRouteWarningPending = false;
     std::optional<std::wstring> executablePath;
     bool isSystemSounds = false;
 
@@ -50,6 +59,13 @@ struct ChannelStrip
     controls::MuteToggle mute;
     controls::PeakMeter meter;
     std::unique_ptr<controls::ComboBox> outputCombo;
+    std::unique_ptr<controls::ComboBox> inputCombo;
+    // outputCombo's items map 1:1 to these (index 0 is the "Default" entry,
+    // which has no id). Kept in sync with the live device list by
+    // SyncStripDevices so a plugged-in device appears without the
+    // strip being recreated.
+    std::vector<std::wstring> outputDeviceIds;
+    std::vector<std::wstring> inputDeviceIds;
     StripLayout layout;
 };
 
@@ -76,12 +92,12 @@ private:
     void SyncWindowWidthToContent();
     StripLayout LayoutStrip(float left, float top, float height,
                              controls::FaderControl& fader, controls::MuteToggle& mute,
-                             controls::PeakMeter* meter, controls::ComboBox* outputCombo);
+                             controls::PeakMeter* meter, controls::ComboBox* outputCombo, controls::ComboBox* inputCombo);
     void Render();
     void DrawStrip(const StripLayout& layout, controls::FaderControl& fader, controls::MuteToggle& mute,
-                    controls::PeakMeter* meter, controls::ComboBox* outputCombo,
+                    controls::PeakMeter* meter, controls::ComboBox* outputCombo, controls::ComboBox* inputCombo,
                     const std::wstring& name, bool active,
-                    const std::optional<std::wstring>& executablePath, bool isSystemSounds);
+                    const std::optional<std::wstring>& executablePath, bool isSystemSounds, bool hasOutputSession = true);
 
     void OnLButtonDown(POINT pt);
     void OnMouseMove(POINT pt);
@@ -94,11 +110,14 @@ private:
     // callbacks arrive off-thread and re-entering the session manager from
     // one deadlocks.
     void Poll();
+    void AnimateMeters();
     void SyncMaster();
     void SyncOutputDevices();
     void SyncInputDevices();
     void ReconcileSessions(const std::vector<winmix::audio::AudioSessionSnapshot>& snapshots);
     void SyncStrip(ChannelStrip& strip, const winmix::audio::AudioSessionSnapshot& snapshot);
+    void SyncStripDevices(ChannelStrip& strip, bool input);
+    void ChangeStripDevice(uint64_t rowId, int index, bool input);
     ChannelStrip CreateStrip(const winmix::audio::AudioSessionSnapshot& snapshot);
 
     // Tray-driven lifecycle: polling only runs while the window is visible
@@ -127,6 +146,7 @@ private:
     Microsoft::WRL::ComPtr<IDWriteTextFormat> labelFormat_;
     Microsoft::WRL::ComPtr<IDWriteTextFormat> nameFormat_;
     Microsoft::WRL::ComPtr<IDWriteTextFormat> comboFormat_;
+    Microsoft::WRL::ComPtr<IDWriteTextFormat> stripComboFormat_;
 
     winmix::audio::AudioSessionService audioService_;
     IconLoader iconLoader_;
@@ -142,7 +162,10 @@ private:
     // at the header level -- one of these is always the actual default).
     std::vector<std::wstring> outputDeviceIds_;
     std::vector<std::wstring> inputDeviceIds_;
-    std::vector<ChannelStrip> strips_;
+    // Stable addresses keep a dragged fader valid when another app arrives.
+    std::list<ChannelStrip> strips_;
+    std::vector<winmix::audio::AudioDeviceInfo> outputDevices_;
+    std::vector<winmix::audio::AudioDeviceInfo> inputDevices_;
 
     // GetDpiForWindow()/96. D2D itself is pinned to 96 DPI (DeviceResources)
     // so rendering and mouse hit-testing always agree; this factor is how
@@ -162,6 +185,10 @@ private:
 
     // The fader currently owning a mouse drag, if any.
     controls::FaderControl* draggingFader_ = nullptr;
+
+    // Source of ChannelStrip::rowId, so each strip gets a value unique for
+    // the process's lifetime regardless of erase/append churn in strips_.
+    uint64_t nextRowId_ = 1;
 };
 
 } // namespace winmix::app

@@ -27,6 +27,7 @@ public:
     // builds (or a null HSTRING to clear the pin) -- ownership stays with
     // the caller, this does not take or release a reference.
     static HRESULT SetPersistedDefaultAudioEndpoint(uint32_t pid, EDataFlow flow, ERole role, HSTRING deviceId);
+    static HRESULT GetPersistedDefaultAudioEndpoint(uint32_t pid, EDataFlow flow, ERole role, HSTRING* deviceId);
 };
 
 } // namespace winmix::audio

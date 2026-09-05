@@ -1,5 +1,7 @@
 #pragma once
 
+#include <windows.h>
+
 #include <cstdint>
 #include <optional>
 #include <string>
@@ -14,7 +16,8 @@ namespace winmix::audio {
 class AppOutputRouter
 {
 public:
-    static void Set(uint32_t pid, const std::optional<std::wstring>& deviceId);
+    static HRESULT Set(uint32_t pid, const std::optional<std::wstring>& deviceId);
+    static HRESULT Get(uint32_t pid, std::optional<std::wstring>& deviceId);
 };
 
 } // namespace winmix::audio

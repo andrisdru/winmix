@@ -43,6 +43,8 @@ public:
     virtual HRESULT STDMETHODCALLTYPE Unused19() = 0;
     virtual HRESULT STDMETHODCALLTYPE SetPersistedDefaultAudioEndpoint(
         DWORD processId, EDataFlow flow, ERole role, HSTRING deviceId) = 0;
+    virtual HRESULT STDMETHODCALLTYPE GetPersistedDefaultAudioEndpoint(
+        DWORD processId, EDataFlow flow, ERole role, HSTRING* deviceId) = 0;
 };
 
 // Below this build, Windows exposes the pre-21H2 shape of this class under a
@@ -116,6 +118,22 @@ HRESULT AudioPolicyConfigFactory::SetPersistedDefaultAudioEndpoint(
     }
 
     return factory->SetPersistedDefaultAudioEndpoint(static_cast<DWORD>(pid), flow, role, deviceId);
+}
+
+HRESULT AudioPolicyConfigFactory::GetPersistedDefaultAudioEndpoint(
+    uint32_t pid, EDataFlow flow, ERole role, HSTRING* deviceId)
+{
+    *deviceId = nullptr;
+    HSTRING classId = nullptr;
+    HRESULT hr = WindowsCreateString(kClassId, static_cast<UINT32>(wcslen(kClassId)), &classId);
+    if (FAILED(hr))
+    {
+        return hr;
+    }
+    ComPtr<IAudioPolicyConfigInternal> factory;
+    hr = RoGetActivationFactory(classId, ClassIid(), reinterpret_cast<void**>(factory.GetAddressOf()));
+    WindowsDeleteString(classId);
+    return FAILED(hr) ? hr : factory->GetPersistedDefaultAudioEndpoint(pid, flow, role, deviceId);
 }
 
 } // namespace winmix::audio

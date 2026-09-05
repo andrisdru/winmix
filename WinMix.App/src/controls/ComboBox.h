@@ -26,7 +26,7 @@ public:
     ComboBox(const ComboBox&) = delete;
     ComboBox& operator=(const ComboBox&) = delete;
 
-    void SetBounds(D2D1_RECT_F bounds) { bounds_ = bounds; }
+    void SetBounds(D2D1_RECT_F bounds);
     const D2D1_RECT_F& Bounds() const { return bounds_; }
 
     // DPI scale factor (GetDpiForWindow()/96). Drives both the D2D-drawn
@@ -35,8 +35,8 @@ public:
     // by the caller) says nothing about how large text inside it should be.
     void SetScale(float scale);
 
-    void SetItems(std::vector<std::wstring> items) { items_ = std::move(items); }
-    void SetSelectedIndex(int index) { selectedIndex_ = index; } // programmatic, no onChange
+    void SetItems(std::vector<std::wstring> items, std::vector<std::wstring> compactLabels = {});
+    void SetSelectedIndex(int index); // programmatic, no onChange
     int SelectedIndex() const { return selectedIndex_; }
     std::wstring SelectedText() const;
 
@@ -58,13 +58,17 @@ private:
     void PaintPopup(HWND hwnd);
     int ItemAtY(int y) const;
     void EnsureGdiFont();
+    void UpdateTooltip();
     int RowHeight() const;
 
     HWND owner_;
     HWND popupHwnd_ = nullptr;
+    HWND tooltipHwnd_ = nullptr;
+    std::wstring tooltipText_;
     D2D1_RECT_F bounds_{};
     float scale_ = 1.0f;
     std::vector<std::wstring> items_;
+    std::vector<std::wstring> compactLabels_;
     int selectedIndex_ = -1;
     int hoveredIndex_ = -1;
 

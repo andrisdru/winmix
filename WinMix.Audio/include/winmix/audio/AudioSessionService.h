@@ -9,16 +9,18 @@
 #include <optional>
 #include <string>
 #include <unordered_map>
+#include <unordered_set>
 #include <vector>
 
 #include "winmix/audio/AudioDeviceInfo.h"
 #include "winmix/audio/AudioSessionSnapshot.h"
 #include "winmix/audio/ProcessInfoCache.h"
+#include "winmix/audio/AppSessionTracker.h"
 
 namespace winmix::audio {
 
-// Reads and controls per-application volume on the default render device via
-// WASAPI.
+// Discovers playback and recording apps across active endpoints, controls
+// playback volume, and reads/writes per-app output and microphone preferences.
 //
 // Threading: every member must be called from a single COM-initialized
 // (STA) thread -- the constructor calls CoCreateInstance, so the caller must
@@ -48,15 +50,14 @@ public:
     bool GetMasterMuted();
     void SetMasterMuted(bool muted);
 
-    // Re-enumerates sessions and returns a fresh snapshot of each one worth
-    // showing. Invalidates any AudioSessionSnapshot::instanceId not present
-    // in the result -- callers must not cache ids across refreshes.
+    // Returns one stable app snapshot across all endpoints. A missing app
+    // survives a short stream-recreation gap with no live session IDs.
     std::vector<AudioSessionSnapshot> Refresh();
 
-    // Sets one session's amplitude scalar. No-op if the session has gone away.
+    // Sets all of an app's playback sessions. Also accepts a raw render ID.
     void SetVolume(const std::wstring& instanceId, float scalar);
 
-    // Mutes or unmutes one session. No-op if the session has gone away.
+    // Mutes or unmutes all of an app's current playback sessions.
     void SetMute(const std::wstring& instanceId, bool muted);
 
     // Active render endpoints, for the output-device picker.
@@ -69,6 +70,10 @@ public:
     // Pins one app's output to deviceId, or with nullopt clears the pin so
     // it follows the system default again.
     void SetAppOutputDevice(uint32_t pid, const std::optional<std::wstring>& deviceId);
+    void SetAppOutputDevice(const std::wstring& appId, const std::optional<std::wstring>& deviceId);
+    // Sets capture preferences, including Communications, without changing
+    // system defaults or output volume. nullopt restores the role defaults.
+    void SetAppInputDevice(const std::wstring& appId, const std::optional<std::wstring>& deviceId);
 
     // Active capture endpoints (microphones), for the input-device picker.
     std::vector<AudioDeviceInfo> ListInputDevices();
@@ -81,7 +86,6 @@ public:
 
 private:
     IMMDevice* Device();
-    static bool IsUsable(IMMDevice* device);
     void ReleaseControls();
     std::wstring GetCachedFriendlyName(IMMDevice* device, const std::wstring& id);
 
@@ -96,6 +100,17 @@ private:
     ProcessInfoCache names_;
     std::unordered_map<std::wstring, Microsoft::WRL::ComPtr<IAudioSessionControl2>> controls_;
     std::unordered_map<std::wstring, std::wstring> deviceNameCache_;
+
+    AppSessionTracker tracker_;
+    std::unordered_map<std::wstring, AudioSessionSnapshot> apps_;
+    struct ControlTransfer
+    {
+        float volume;
+        bool muted;
+        AppSessionTracker::Clock::time_point expires;
+        std::unordered_set<std::wstring> appliedIds;
+    };
+    std::unordered_map<std::wstring, ControlTransfer> transfers_;
 };
 
 } // namespace winmix::audio

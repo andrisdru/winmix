@@ -2,6 +2,7 @@
 #include "Theme.h"
 
 #include <windowsx.h>
+#include <commctrl.h>
 
 #include <algorithm>
 #include <cmath>
@@ -30,17 +31,77 @@ ComboBox::ComboBox(HWND owner) : owner_(owner)
     wc.hCursor = LoadCursorW(nullptr, IDC_ARROW);
     // Harmless if another ComboBox instance already registered this class.
     RegisterClassExW(&wc);
+
+    INITCOMMONCONTROLSEX controls{sizeof(controls), ICC_WIN95_CLASSES};
+    InitCommonControlsEx(&controls);
+    tooltipHwnd_ = CreateWindowExW(WS_EX_TOPMOST, TOOLTIPS_CLASSW, nullptr,
+        WS_POPUP | TTS_ALWAYSTIP | TTS_NOPREFIX, CW_USEDEFAULT, CW_USEDEFAULT,
+        CW_USEDEFAULT, CW_USEDEFAULT, owner_, nullptr, GetModuleHandleW(nullptr), nullptr);
+    if (tooltipHwnd_)
+    {
+        TTTOOLINFOW tool{};
+        tool.cbSize = sizeof(tool);
+        tool.uFlags = TTF_SUBCLASS;
+        tool.hwnd = owner_;
+        tool.uId = 1;
+        tool.lpszText = const_cast<wchar_t*>(L"");
+        SendMessageW(tooltipHwnd_, TTM_ADDTOOLW, 0, reinterpret_cast<LPARAM>(&tool));
+        SendMessageW(tooltipHwnd_, TTM_SETMAXTIPWIDTH, 0, 480);
+    }
 }
 
 ComboBox::~ComboBox()
 {
     CloseIfOpen();
+    if (tooltipHwnd_) DestroyWindow(tooltipHwnd_);
     DeleteObject(panelGdiBrush_);
     DeleteObject(hoverGdiBrush_);
     if (gdiFont_)
     {
         DeleteObject(gdiFont_);
     }
+}
+
+void ComboBox::SetBounds(D2D1_RECT_F bounds)
+{
+    bounds_ = bounds;
+    if (tooltipHwnd_)
+    {
+        TTTOOLINFOW tool{};
+        tool.cbSize = sizeof(tool);
+        tool.hwnd = owner_;
+        tool.uId = 1;
+        tool.rect = {static_cast<LONG>(bounds.left), static_cast<LONG>(bounds.top),
+                     static_cast<LONG>(bounds.right), static_cast<LONG>(bounds.bottom)};
+        SendMessageW(tooltipHwnd_, TTM_NEWTOOLRECTW, 0, reinterpret_cast<LPARAM>(&tool));
+    }
+}
+
+void ComboBox::SetItems(std::vector<std::wstring> items, std::vector<std::wstring> compactLabels)
+{
+    if (items_ != items) items_ = std::move(items);
+    if (compactLabels.size() != items_.size()) compactLabels.clear();
+    if (compactLabels_ != compactLabels) compactLabels_ = std::move(compactLabels);
+    UpdateTooltip();
+}
+
+void ComboBox::SetSelectedIndex(int index)
+{
+    selectedIndex_ = index;
+    UpdateTooltip();
+}
+
+void ComboBox::UpdateTooltip()
+{
+    const auto fullName = SelectedText();
+    if (!tooltipHwnd_ || fullName == tooltipText_) return;
+    tooltipText_ = fullName;
+    TTTOOLINFOW tool{};
+    tool.cbSize = sizeof(tool);
+    tool.hwnd = owner_;
+    tool.uId = 1;
+    tool.lpszText = tooltipText_.data();
+    SendMessageW(tooltipHwnd_, TTM_UPDATETIPTEXTW, 0, reinterpret_cast<LPARAM>(&tool));
 }
 
 void ComboBox::SetScale(float scale)
@@ -121,6 +182,8 @@ void ComboBox::OpenPopup()
     }
 
     EnsureGdiFont();
+    if (tooltipHwnd_) SendMessageW(tooltipHwnd_, TTM_POP, 0, 0);
+    hoveredIndex_ = -1;
 
     POINT topLeft{static_cast<int>(bounds_.left), static_cast<int>(bounds_.bottom) + 2};
     ClientToScreen(owner_, &topLeft);
@@ -145,11 +208,26 @@ void ComboBox::OpenPopup()
         ReleaseDC(nullptr, screenDc);
     }
 
-    const int textPadding = static_cast<int>(std::lround(16.0f * scale_)); // 8px each side
+    const int textPadding = static_cast<int>(std::lround(36.0f * scale_)); // checkmark and text padding
     const int buttonWidth = static_cast<int>(bounds_.right - bounds_.left);
     const int minWidth = static_cast<int>(std::lround(kPopupMinWidth * scale_));
     const int width = std::max({buttonWidth, minWidth, widestTextWidth + textPadding});
     const int height = static_cast<int>(items_.size()) * RowHeight() + 4;
+
+    // The lower input picker can sit near the screen edge. Keep its menu
+    // in the monitor's work area, opening above the button when necessary.
+    MONITORINFO monitor{sizeof(monitor)};
+    if (GetMonitorInfoW(MonitorFromWindow(owner_, MONITOR_DEFAULTTONEAREST), &monitor))
+    {
+        const auto& work = monitor.rcWork;
+        topLeft.x = std::max(work.left, std::min(topLeft.x, work.right - width));
+        if (topLeft.y + height > work.bottom)
+        {
+            POINT above{0, static_cast<LONG>(bounds_.top)};
+            ClientToScreen(owner_, &above);
+            topLeft.y = std::max(work.top, above.y - height - 2);
+        }
+    }
 
     popupHwnd_ = CreateWindowExW(
         WS_EX_TOOLWINDOW,
@@ -192,7 +270,7 @@ void ComboBox::PaintPopup(HWND hwnd)
     SetTextColor(hdc, textColorRef_);
 
     const int rowHeight = RowHeight();
-    const int textLeftPad = static_cast<int>(std::lround(8.0f * scale_));
+    const int textLeftPad = static_cast<int>(std::lround(28.0f * scale_));
 
     for (size_t i = 0; i < items_.size(); ++i)
     {
@@ -203,6 +281,13 @@ void ComboBox::PaintPopup(HWND hwnd)
         }
         RECT textRect = row;
         textRect.left += textLeftPad;
+        if (static_cast<int>(i) == selectedIndex_)
+        {
+            RECT checkRect = row;
+            checkRect.left += static_cast<int>(std::lround(6.0f * scale_));
+            checkRect.right = textRect.left;
+            DrawTextW(hdc, L"\u2713", 1, &checkRect, DT_SINGLELINE | DT_VCENTER | DT_LEFT | DT_NOPREFIX);
+        }
         DrawTextW(hdc, items_[i].c_str(), -1, &textRect,
                   DT_SINGLELINE | DT_VCENTER | DT_LEFT | DT_END_ELLIPSIS | DT_NOPREFIX);
     }
@@ -240,15 +325,15 @@ LRESULT CALLBACK ComboBox::PopupWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPAR
         if (self)
         {
             const int clicked = self->ItemAtY(GET_Y_LPARAM(lParam));
+            // Close before notifying: callbacks may display a dialog and
+            // pump messages that remove this app and destroy its combo.
+            const auto onChange = self->onChange;
             if (clicked >= 0)
             {
-                self->selectedIndex_ = clicked;
-                if (self->onChange)
-                {
-                    self->onChange(clicked);
-                }
+                self->SetSelectedIndex(clicked);
             }
             DestroyWindow(hwnd);
+            if (clicked >= 0 && onChange) onChange(clicked);
         }
         return 0;
 
@@ -280,10 +365,11 @@ void ComboBox::Draw(ID2D1DeviceContext* ctx, IDWriteTextFormat* textFormat,
     ctx->DrawRoundedRectangle(D2D1::RoundedRect(bounds_, radius, radius), borderBrush, 1.0f * scale_);
 
     D2D1_RECT_F textRect = bounds_;
-    textRect.left += 8.0f * scale_;
-    textRect.right -= 20.0f * scale_;
+    textRect.left += (compactLabels_.empty() ? 8.0f : 5.0f) * scale_;
+    textRect.right -= (compactLabels_.empty() ? 20.0f : 15.0f) * scale_;
 
-    const std::wstring text = SelectedText();
+    const std::wstring text = !compactLabels_.empty() && selectedIndex_ >= 0 && selectedIndex_ < static_cast<int>(compactLabels_.size())
+        ? compactLabels_[selectedIndex_] : SelectedText();
     ctx->DrawText(text.c_str(), static_cast<UINT32>(text.size()), textFormat, textRect, textBrush,
                   D2D1_DRAW_TEXT_OPTIONS_CLIP);
 
@@ -302,7 +388,7 @@ void ComboBox::Draw(ID2D1DeviceContext* ctx, IDWriteTextFormat* textFormat,
         sink->Close();
     }
 
-    const float cx = bounds_.right - 12.0f * scale_;
+    const float cx = bounds_.right - (compactLabels_.empty() ? 12.0f : 8.0f) * scale_;
     const float cy = (bounds_.top + bounds_.bottom) / 2.0f;
 
     ComPtr<ID2D1TransformedGeometry> transformed;

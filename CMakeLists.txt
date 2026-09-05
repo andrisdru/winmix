@@ -6,7 +6,19 @@ cmake_minimum_required(VERSION 3.26)
 cmake_policy(SET CMP0091 NEW)
 set(CMAKE_MSVC_RUNTIME_LIBRARY "MultiThreaded$<$<CONFIG:Debug>:Debug>")
 
-project(WinMix LANGUAGES CXX)
+# Single source of truth for the app version, bumped by the /app-version
+# skill -- everything else (the GUI's title bar/tray tooltip/tray menu via
+# WinMix.App's generated Version.h) reads PROJECT_VERSION from here rather
+# than duplicating the number.
+file(STRINGS "${CMAKE_CURRENT_SOURCE_DIR}/VERSION" WINMIX_VERSION LIMIT_COUNT 1)
+
+project(WinMix LANGUAGES CXX VERSION ${WINMIX_VERSION})
+
+# Without this, editing VERSION alone doesn't trigger a reconfigure --
+# `cmake --build` only reruns configure when it notices CMakeLists.txt
+# itself (or another tracked input) changed, so PROJECT_VERSION and the
+# generated Version.h would keep silently serving the old number.
+set_property(DIRECTORY APPEND PROPERTY CMAKE_CONFIGURE_DEPENDS "${CMAKE_CURRENT_SOURCE_DIR}/VERSION")
 
 set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)

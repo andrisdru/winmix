@@ -1,4 +1,5 @@
 #include "TrayIcon.h"
+#include "Version.h"
 
 #include <windowsx.h>
 
@@ -8,6 +9,7 @@ namespace {
 constexpr UINT_PTR kMenuOpenId = 1;
 constexpr UINT_PTR kMenuExitId = 2;
 constexpr UINT_PTR kMenuAutostartId = 3;
+constexpr UINT_PTR kMenuVersionId = 4; // disabled -- never actually selectable
 constexpr UINT_PTR kMenuInputDeviceBase = 100; // + index into the current device list
 } // namespace
 
@@ -20,7 +22,8 @@ TrayIcon::TrayIcon(HWND owner, UINT callbackMessage, HICON icon)
     nid_.uFlags = NIF_ICON | NIF_MESSAGE | NIF_TIP;
     nid_.uCallbackMessage = callbackMessage_;
     nid_.hIcon = icon;
-    wcsncpy_s(nid_.szTip, L"WinMix", _TRUNCATE);
+    const std::wstring tip = std::wstring(L"WinMix v") + kWinMixVersion;
+    wcsncpy_s(nid_.szTip, tip.c_str(), _TRUNCATE);
 
     added_ = Shell_NotifyIconW(NIM_ADD, &nid_) != FALSE;
 }
@@ -82,6 +85,8 @@ void TrayIcon::ShowContextMenu()
     AppendMenuW(menu, MF_STRING | (autostartEnabled ? MF_CHECKED : 0u), kMenuAutostartId, L"Start with Windows");
 
     AppendMenuW(menu, MF_SEPARATOR, 0, nullptr);
+    const std::wstring versionLabel = std::wstring(L"WinMix v") + kWinMixVersion;
+    AppendMenuW(menu, MF_STRING | MF_DISABLED, kMenuVersionId, versionLabel.c_str());
     AppendMenuW(menu, MF_STRING, kMenuExitId, L"Exit");
 
     POINT pt;

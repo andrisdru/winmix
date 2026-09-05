@@ -3,8 +3,10 @@ add_library(winmix_audio STATIC
     src/ProcessInfoCache.cpp
     src/SessionNaming.cpp
     src/AudioSessionService.cpp
+    src/AppSessionTracker.cpp
     src/AudioPolicyConfigFactory.cpp
     src/AppOutputRouter.cpp
+    src/AppDeviceRouter.cpp
     src/PolicyConfigInterop.cpp
 )
 

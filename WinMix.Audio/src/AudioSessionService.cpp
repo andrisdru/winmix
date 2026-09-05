@@ -1,5 +1,6 @@
 #include "winmix/audio/AudioSessionService.h"
 #include "winmix/audio/AppOutputRouter.h"
+#include "winmix/audio/AppDeviceRouter.h"
 #include "winmix/audio/PolicyConfigInterop.h"
 #include "winmix/audio/SessionNaming.h"
 
@@ -133,97 +134,155 @@ void AudioSessionService::SetMasterMuted(bool muted)
 
 std::vector<AudioSessionSnapshot> AudioSessionService::Refresh()
 {
-    IMMDevice* device = Device();
+    // Include capture endpoints: a recording-only app must still have an
+    // input picker, and a browser may capture in a separate worker process.
+    std::optional<std::wstring> defaultDeviceId;
+    ComPtr<IMMDevice> defaultDevice;
+    if (SUCCEEDED(enumerator_->GetDefaultAudioEndpoint(eRender, eMultimedia, &defaultDevice)))
+    {
+        LPWSTR raw = nullptr;
+        if (SUCCEEDED(defaultDevice->GetId(&raw))) defaultDeviceId = TakeCoString(raw);
+    }
 
-    ComPtr<IAudioSessionManager2> manager;
+    ComPtr<IMMDeviceCollection> deviceCollection;
     ThrowIfFailed(
-        device->Activate(__uuidof(IAudioSessionManager2), CLSCTX_ALL, nullptr, &manager),
-        "Activate(IAudioSessionManager2)");
+        enumerator_->EnumAudioEndpoints(eAll, DEVICE_STATE_ACTIVE, &deviceCollection),
+        "EnumAudioEndpoints(all)");
 
-    // Unlike NAudio's AudioSessionManager.RefreshSessions() (a managed-side
-    // convenience with no native counterpart), IAudioSessionManager2 has no
-    // RefreshSessions method -- GetSessionEnumerator() itself always returns
-    // the current session set.
-    ComPtr<IAudioSessionEnumerator> sessionEnum;
-    ThrowIfFailed(manager->GetSessionEnumerator(&sessionEnum), "GetSessionEnumerator");
+    UINT deviceCount = 0;
+    ThrowIfFailed(deviceCollection->GetCount(&deviceCount), "GetCount(render devices)");
 
     // The previous batch of controls is released here (ComPtr's destructor
     // does the Release) before the map is repopulated below.
     ReleaseControls();
 
-    int count = 0;
-    ThrowIfFailed(sessionEnum->GetCount(&count), "GetCount");
-
     std::vector<AudioSessionSnapshot> snapshots;
-    snapshots.reserve(static_cast<size_t>(count));
     std::unordered_set<uint32_t> livePids;
 
-    for (int i = 0; i < count; ++i)
+    for (UINT d = 0; d < deviceCount; ++d)
     {
-        ComPtr<IAudioSessionControl> baseControl;
-        if (FAILED(sessionEnum->GetSession(i, &baseControl)))
+        ComPtr<IMMDevice> device;
+        if (FAILED(deviceCollection->Item(d, &device)))
         {
             continue;
         }
 
-        ComPtr<IAudioSessionControl2> control;
-        if (FAILED(baseControl.As(&control)))
+        LPWSTR rawId = nullptr;
+        if (FAILED(device->GetId(&rawId)))
+        {
+            continue;
+        }
+        const std::wstring deviceId = *TakeCoString(rawId);
+        const bool isDefaultDevice = defaultDeviceId && deviceId == *defaultDeviceId;
+        ComPtr<IMMEndpoint> endpoint;
+        EDataFlow flow = eRender;
+        if (FAILED(device.As(&endpoint)) || FAILED(endpoint->GetDataFlow(&flow))) continue;
+        const bool isInput = flow == eCapture;
+
+        ComPtr<IAudioSessionManager2> manager;
+        if (FAILED(device->Activate(__uuidof(IAudioSessionManager2), CLSCTX_ALL, nullptr, &manager)))
         {
             continue;
         }
 
-        ::AudioSessionState state = ::AudioSessionStateInactive;
-        if (FAILED(control->GetState(&state)))
+        // Unlike NAudio's AudioSessionManager.RefreshSessions() (a
+        // managed-side convenience with no native counterpart),
+        // IAudioSessionManager2 has no RefreshSessions method --
+        // GetSessionEnumerator() itself always returns the current session
+        // set.
+        ComPtr<IAudioSessionEnumerator> sessionEnum;
+        if (FAILED(manager->GetSessionEnumerator(&sessionEnum)))
         {
             continue;
         }
 
-        if (state == ::AudioSessionStateExpired)
+        int count = 0;
+        if (FAILED(sessionEnum->GetCount(&count)))
         {
             continue;
         }
 
-        LPWSTR rawInstanceId = nullptr;
-        if (FAILED(control->GetSessionInstanceIdentifier(&rawInstanceId)))
+        for (int i = 0; i < count; ++i)
         {
-            continue;
+            ComPtr<IAudioSessionControl> baseControl;
+            if (FAILED(sessionEnum->GetSession(i, &baseControl)))
+            {
+                continue;
+            }
+
+            ComPtr<IAudioSessionControl2> control;
+            if (FAILED(baseControl.As(&control)))
+            {
+                continue;
+            }
+
+            ::AudioSessionState state = ::AudioSessionStateInactive;
+            if (FAILED(control->GetState(&state)))
+            {
+                continue;
+            }
+
+            if (state == ::AudioSessionStateExpired)
+            {
+                continue;
+            }
+
+            DWORD pid = 0;
+            control->GetProcessId(&pid);
+
+            const bool isSystemSounds = control->IsSystemSoundsSession() == S_OK;
+            // Keep paused apps on every endpoint. Grouping below coalesces
+            // stale and replacement streams into a single app control.
+            if (isSystemSounds && (isInput || (!isDefaultDevice && state != ::AudioSessionStateActive)))
+            {
+                continue;
+            }
+
+            LPWSTR rawInstanceId = nullptr;
+            if (FAILED(control->GetSessionInstanceIdentifier(&rawInstanceId)))
+            {
+                continue;
+            }
+            const auto instanceIdOpt = TakeCoString(rawInstanceId);
+            if (!instanceIdOpt || instanceIdOpt->empty() || controls_.contains(*instanceIdOpt))
+            {
+                continue;
+            }
+            const std::wstring instanceId = *instanceIdOpt;
+
+            livePids.insert(pid);
+
+            const ProcessInfo& info = names_.Get(pid);
+            float volume = 0.0f;
+            BOOL muted = FALSE;
+            ComPtr<ISimpleAudioVolume> simpleVolume;
+            if (!isInput && SUCCEEDED(control->QueryInterface(IID_PPV_ARGS(&simpleVolume))))
+            {
+                simpleVolume->GetMasterVolume(&volume);
+                simpleVolume->GetMute(&muted);
+            }
+
+            AudioSessionSnapshot snapshot;
+            snapshot.instanceId = instanceId;
+            snapshot.pid = pid;
+            snapshot.displayName = ChooseDisplayName(control.Get(), info, isSystemSounds);
+            snapshot.executablePath = info.executablePath;
+            snapshot.volume = volume;
+            snapshot.isMuted = muted != FALSE;
+            snapshot.peakLevel = ReadPeak(control.Get());
+            snapshot.isSystemSounds = isSystemSounds;
+            snapshot.state = static_cast<SessionState>(state);
+            snapshot.hasOutputSession = !isInput;
+            if (snapshot.IsActive())
+            {
+                if (isInput) snapshot.activeInputDeviceIds.push_back(deviceId);
+                else snapshot.activeOutputDeviceIds.push_back(deviceId);
+            }
+
+            // Capture controls never enter the playback volume/mute map.
+            if (!isInput) controls_.emplace(instanceId, control);
+            snapshots.push_back(std::move(snapshot));
         }
-        const auto instanceIdOpt = TakeCoString(rawInstanceId);
-        if (!instanceIdOpt || instanceIdOpt->empty() || controls_.contains(*instanceIdOpt))
-        {
-            continue;
-        }
-        const std::wstring instanceId = *instanceIdOpt;
-
-        DWORD pid = 0;
-        control->GetProcessId(&pid);
-        livePids.insert(pid);
-
-        const ProcessInfo& info = names_.Get(pid);
-        const bool isSystemSounds = control->IsSystemSoundsSession() == S_OK;
-
-        float volume = 0.0f;
-        BOOL muted = FALSE;
-        ComPtr<ISimpleAudioVolume> simpleVolume;
-        if (SUCCEEDED(control->QueryInterface(IID_PPV_ARGS(&simpleVolume))))
-        {
-            simpleVolume->GetMasterVolume(&volume);
-            simpleVolume->GetMute(&muted);
-        }
-
-        AudioSessionSnapshot snapshot;
-        snapshot.instanceId = instanceId;
-        snapshot.pid = pid;
-        snapshot.displayName = ChooseDisplayName(control.Get(), info, isSystemSounds);
-        snapshot.executablePath = info.executablePath;
-        snapshot.volume = volume;
-        snapshot.isMuted = muted != FALSE;
-        snapshot.peakLevel = ReadPeak(control.Get());
-        snapshot.isSystemSounds = isSystemSounds;
-        snapshot.state = static_cast<SessionState>(state);
-
-        controls_.emplace(instanceId, control);
-        snapshots.push_back(std::move(snapshot));
     }
 
     names_.Trim(livePids);
@@ -237,49 +296,93 @@ std::vector<AudioSessionSnapshot> AudioSessionService::Refresh()
         return CompareDisplayNames(a.displayName, b.displayName) < 0;
     });
 
+    snapshots = tracker_.Refresh(snapshots, AppSessionTracker::Clock::now());
+    const auto now = AppSessionTracker::Clock::now();
+    std::erase_if(transfers_, [&](const auto& entry) { return now >= entry.second.expires; });
+    apps_.clear();
+    for (auto& snapshot : snapshots)
+    {
+        if (const auto transfer = transfers_.find(snapshot.instanceId); transfer != transfers_.end())
+        {
+            bool applied = false;
+            for (const auto& id : snapshot.sessionInstanceIds)
+            {
+                if (transfer->second.appliedIds.contains(id)) continue;
+                ComPtr<IAudioSessionControl2> control;
+                ComPtr<ISimpleAudioVolume> volume;
+                if (TryGetControl(id, control) && SUCCEEDED(control.As(&volume)) &&
+                    SUCCEEDED(volume->SetMasterVolume(transfer->second.volume, nullptr)) &&
+                    SUCCEEDED(volume->SetMute(transfer->second.muted ? TRUE : FALSE, nullptr)))
+                {
+                    transfer->second.appliedIds.insert(id);
+                    applied = true;
+                }
+            }
+            if (applied)
+            {
+                snapshot.volume = transfer->second.volume;
+                snapshot.isMuted = transfer->second.muted;
+            }
+        }
+        if (!snapshot.isSystemSounds && (!snapshot.sessionInstanceIds.empty() || !snapshot.inputSessionInstanceIds.empty()))
+        {
+            snapshot.outputDeviceKnown = SUCCEEDED(AppOutputRouter::Get(snapshot.pid, snapshot.outputDeviceId));
+            const auto inputPid = snapshot.inputProcessIds.empty() ? snapshot.pid : snapshot.inputProcessIds.front();
+            snapshot.inputDeviceKnown = SUCCEEDED(AppDeviceRouter::Get(inputPid, eCapture, snapshot.inputDeviceId));
+        }
+        apps_.emplace(snapshot.instanceId, snapshot);
+    }
     return snapshots;
 }
 
 void AudioSessionService::SetVolume(const std::wstring& instanceId, float scalar)
 {
-    ComPtr<IAudioSessionControl2> control;
-    if (!TryGetControl(instanceId, control))
-    {
-        return;
-    }
-
+    const auto app = apps_.find(instanceId);
+    const auto ids = app != apps_.end() ? app->second.sessionInstanceIds : std::vector<std::wstring>{instanceId};
     scalar = std::clamp(scalar, 0.0f, 1.0f);
-    Guarded([&]()
+    for (const auto& id : ids)
     {
-        ComPtr<ISimpleAudioVolume> simpleVolume;
-        ThrowIfFailed(control->QueryInterface(IID_PPV_ARGS(&simpleVolume)), "QI(ISimpleAudioVolume)");
-        ThrowIfFailed(simpleVolume->SetMasterVolume(scalar, nullptr), "SetMasterVolume");
-    });
+        ComPtr<IAudioSessionControl2> control;
+        if (!TryGetControl(id, control)) continue;
+        Guarded([&]()
+        {
+            ComPtr<ISimpleAudioVolume> volume;
+            ThrowIfFailed(control.As(&volume), "QI(ISimpleAudioVolume)");
+            ThrowIfFailed(volume->SetMasterVolume(scalar, nullptr), "SetMasterVolume");
+        });
+    }
+    if (app != apps_.end()) app->second.volume = scalar;
+    if (const auto transfer = transfers_.find(instanceId); transfer != transfers_.end()) transfer->second.volume = scalar;
 }
 
 void AudioSessionService::SetMute(const std::wstring& instanceId, bool muted)
 {
-    ComPtr<IAudioSessionControl2> control;
-    if (!TryGetControl(instanceId, control))
+    const auto app = apps_.find(instanceId);
+    const auto ids = app != apps_.end() ? app->second.sessionInstanceIds : std::vector<std::wstring>{instanceId};
+    for (const auto& id : ids)
     {
-        return;
+        ComPtr<IAudioSessionControl2> control;
+        if (!TryGetControl(id, control)) continue;
+        Guarded([&]()
+        {
+            ComPtr<ISimpleAudioVolume> volume;
+            ThrowIfFailed(control.As(&volume), "QI(ISimpleAudioVolume)");
+            ThrowIfFailed(volume->SetMute(muted ? TRUE : FALSE, nullptr), "SetMute");
+        });
     }
-
-    Guarded([&]()
-    {
-        ComPtr<ISimpleAudioVolume> simpleVolume;
-        ThrowIfFailed(control->QueryInterface(IID_PPV_ARGS(&simpleVolume)), "QI(ISimpleAudioVolume)");
-        ThrowIfFailed(simpleVolume->SetMute(muted ? TRUE : FALSE, nullptr), "SetMute");
-    });
+    if (app != apps_.end()) app->second.isMuted = muted;
+    if (const auto transfer = transfers_.find(instanceId); transfer != transfers_.end()) transfer->second.muted = muted;
 }
 
 std::vector<AudioDeviceInfo> AudioSessionService::ListOutputDevices()
 {
-    IMMDevice* device = Device();
-
-    LPWSTR rawDefaultId = nullptr;
-    ThrowIfFailed(device->GetId(&rawDefaultId), "GetId");
-    const std::wstring defaultId = *TakeCoString(rawDefaultId);
+    std::optional<std::wstring> defaultId;
+    ComPtr<IMMDevice> defaultDevice;
+    if (SUCCEEDED(enumerator_->GetDefaultAudioEndpoint(eRender, eMultimedia, &defaultDevice)))
+    {
+        LPWSTR raw = nullptr;
+        if (SUCCEEDED(defaultDevice->GetId(&raw))) defaultId = TakeCoString(raw);
+    }
 
     ComPtr<IMMDeviceCollection> collection;
     ThrowIfFailed(enumerator_->EnumAudioEndpoints(eRender, DEVICE_STATE_ACTIVE, &collection), "EnumAudioEndpoints(render)");
@@ -304,7 +407,7 @@ std::vector<AudioDeviceInfo> AudioSessionService::ListOutputDevices()
         }
         const std::wstring id = *TakeCoString(rawId);
 
-        devices.push_back(AudioDeviceInfo{id, GetCachedFriendlyName(item.Get(), id), id == defaultId});
+        devices.push_back(AudioDeviceInfo{id, GetCachedFriendlyName(item.Get(), id), defaultId && id == *defaultId});
     }
 
     return devices;
@@ -326,7 +429,69 @@ void AudioSessionService::SetDefaultOutputDevice(const std::wstring& deviceId)
 
 void AudioSessionService::SetAppOutputDevice(uint32_t pid, const std::optional<std::wstring>& deviceId)
 {
-    AppOutputRouter::Set(pid, deviceId);
+    ThrowIfFailed(AppOutputRouter::Set(pid, deviceId), "Windows could not change the app output device.");
+}
+
+void AudioSessionService::SetAppOutputDevice(const std::wstring& appId, const std::optional<std::wstring>& deviceId)
+{
+    const auto app = apps_.find(appId);
+    if (app == apps_.end() || app->second.isSystemSounds)
+    {
+        throw std::runtime_error("The application no longer has an audio session.");
+    }
+    std::unordered_set<uint32_t> pids(app->second.processIds.begin(), app->second.processIds.end());
+    // Endpoints remember independent levels. Align existing (including idle)
+    // streams now, and transfer the level once to any replacement streams
+    // created during this switch. Subsequent external changes remain readable.
+    ControlTransfer transfer{app->second.volume, app->second.isMuted,
+        AppSessionTracker::Clock::now() + std::chrono::seconds(3), {}};
+    if (app->second.hasOutputSession)
+    {
+        SetVolume(appId, transfer.volume);
+        SetMute(appId, transfer.muted);
+    }
+    HRESULT failure = S_OK;
+    uint32_t failedPid = 0;
+    for (uint32_t pid : pids)
+    {
+        if (!pid) continue;
+        const HRESULT hr = AppOutputRouter::Set(pid, deviceId);
+        if (FAILED(hr))
+        {
+            failure = hr;
+            failedPid = pid;
+        }
+    }
+    if (FAILED(failure))
+    {
+        char message[160];
+        sprintf_s(message, "Windows could not change the app output (process %u, error 0x%08lX).",
+                  failedPid, static_cast<unsigned long>(failure));
+        throw ComException(failure, message);
+    }
+    if (app->second.hasOutputSession) transfers_[appId] = std::move(transfer);
+}
+
+void AudioSessionService::SetAppInputDevice(const std::wstring& appId, const std::optional<std::wstring>& deviceId)
+{
+    const auto app = apps_.find(appId);
+    if (app == apps_.end() || app->second.isSystemSounds)
+        throw std::runtime_error("The application no longer has an audio session.");
+
+    // Includes both playback and microphone workers belonging to this app.
+    // Only capture policy is changed; playback volume and routing stay intact.
+    for (const auto pid : app->second.processIds)
+    {
+        if (!pid) continue;
+        const HRESULT hr = AppDeviceRouter::Set(pid, eCapture, deviceId);
+        if (FAILED(hr))
+        {
+            char message[160];
+            sprintf_s(message, "Windows could not change the app input (process %u, error 0x%08lX).",
+                      pid, static_cast<unsigned long>(hr));
+            throw ComException(hr, message);
+        }
+    }
 }
 
 std::vector<AudioDeviceInfo> AudioSessionService::ListInputDevices()
@@ -462,32 +627,14 @@ void AudioSessionService::ReleaseControls()
 
 IMMDevice* AudioSessionService::Device()
 {
-    // Re-resolve when the default endpoint changes under us (headphones
-    // plugged in, device disabled); the old device pointer keeps returning
-    // stale sessions rather than failing loudly.
-    if (device_ && IsUsable(device_.Get()))
-    {
-        return device_.Get();
-    }
-
-    ReleaseControls();
-    device_.Reset();
-
+    // An old default endpoint can remain active after Windows selects a
+    // different one. Resolve the actual default, not just its device state.
+    ComPtr<IMMDevice> current;
     ThrowIfFailed(
-        enumerator_->GetDefaultAudioEndpoint(eRender, eMultimedia, &device_),
+        enumerator_->GetDefaultAudioEndpoint(eRender, eMultimedia, &current),
         "GetDefaultAudioEndpoint(render)");
-
+    device_ = std::move(current);
     return device_.Get();
-}
-
-bool AudioSessionService::IsUsable(IMMDevice* device)
-{
-    DWORD state = 0;
-    if (FAILED(device->GetState(&state)))
-    {
-        return false;
-    }
-    return state == DEVICE_STATE_ACTIVE;
 }
 
 } // namespace winmix::audio

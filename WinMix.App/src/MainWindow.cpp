@@ -1,6 +1,8 @@
 #include "MainWindow.h"
 #include "Autostart.h"
+#include "DeviceLabels.h"
 #include "Theme.h"
+#include "Version.h"
 #include "resource.h"
 
 #include "winmix/audio/VolumeCurve.h"
@@ -41,7 +43,9 @@ constexpr float kIconSize = 20.0f;
 constexpr float kMinFaderHeight = 60.0f;
 constexpr float kLabelHeight = 18.0f;
 constexpr float kMuteHeight = 26.0f;
-constexpr float kComboHeight = 22.0f;
+constexpr float kComboHeight = 32.0f;
+constexpr float kDeviceLabelHeight = 12.0f;
+constexpr float kDeviceLabelGap = 2.0f;
 constexpr float kMeterHeight = 3.0f;
 // Two lines: long app names (e.g. "Firefox Nightly Preview") wrap instead
 // of ellipsis-truncating into an unreadable fragment -- see nameFormat_'s
@@ -59,15 +63,23 @@ constexpr float kStripContentHeight =
     kMinFaderHeight + kRowGap +
     kLabelHeight + kRowGap +
     kMuteHeight + kRowGap +
-    kComboHeight + kRowGap +
+    2.0f * (kDeviceLabelHeight + kDeviceLabelGap + kComboHeight + kRowGap) +
     kMeterHeight + kRowGap +
     kNameHeight + kCardPaddingBottom;
 
-// Fast enough that the peak meters read as continuous, slow enough that
-// re-enumerating sessions stays free -- matches the .NET version's poll
-// interval exactly.
+// Slow enough that re-enumerating sessions stays free -- matches the .NET
+// version's poll interval exactly. Peak meter smoothness no longer rides on
+// this: see kMeterTimerId below.
 constexpr UINT_PTR kPollTimerId = 1;
 constexpr UINT kPollIntervalMs = 100;
+
+// Drives PeakMeter::Advance() independently of the audio poll above, so the
+// bars ease between polled values instead of stepping once per 100ms. Pure
+// UI animation -- touches no COM/audio state -- so running it faster than
+// the poll is free.
+constexpr UINT_PTR kMeterTimerId = 2;
+constexpr UINT kMeterIntervalMs = 16;
+constexpr float kMeterFrameSeconds = kMeterIntervalMs / 1000.0f;
 
 // How far the device's reported scalar may drift from what the fader
 // implies before it's treated as a genuine external change. WASAPI
@@ -86,9 +98,10 @@ constexpr LONG kMaxWidthMargin = 60;
 // Height="420") rather than tracking content -- the fader absorbs whatever
 // room that leaves via its stretch in LayoutStrip, so there's never a dead
 // gap at the bottom regardless of this value or the user's own resize.
-constexpr float kDefaultHeight = 420.0f;
+constexpr float kDefaultHeight = 480.0f;
 
 constexpr UINT kTrayCallbackMessage = WM_APP + 1;
+constexpr UINT kRouteWarningMessage = WM_APP + 2;
 
 // Without this, a format with no-wrap + DRAW_TEXT_OPTIONS_CLIP just hard-cuts
 // whatever doesn't fit at the layout rect's edge -- for LEADING alignment
@@ -132,8 +145,9 @@ MainWindow::MainWindow(HINSTANCE hInstance)
     const int initialWidth = static_cast<int>(std::lround(static_cast<float>(kMinWidth) * initialScale));
     const int initialHeight = static_cast<int>(std::lround(kDefaultHeight * initialScale));
 
+    const std::wstring windowTitle = std::wstring(kWindowTitle) + L" v" + kWinMixVersion;
     hwnd_ = CreateWindowExW(
-        0, kClassName, kWindowTitle, WS_OVERLAPPEDWINDOW,
+        0, kClassName, windowTitle.c_str(), WS_OVERLAPPEDWINDOW,
         CW_USEDEFAULT, CW_USEDEFAULT, initialWidth, initialHeight,
         nullptr, nullptr, hInstance, this);
 
@@ -271,6 +285,7 @@ void MainWindow::StartPolling()
     }
     timerRunning_ = true;
     SetTimer(hwnd_, kPollTimerId, kPollIntervalMs, nullptr);
+    SetTimer(hwnd_, kMeterTimerId, kMeterIntervalMs, nullptr);
     Poll();
     Layout();
     InvalidateRect(hwnd_, nullptr, FALSE);
@@ -284,6 +299,7 @@ void MainWindow::StopPolling()
     }
     timerRunning_ = false;
     KillTimer(hwnd_, kPollTimerId);
+    KillTimer(hwnd_, kMeterTimerId);
 }
 
 std::vector<TrayInputDevice> MainWindow::ListInputDevicesForTray()
@@ -377,11 +393,38 @@ LRESULT MainWindow::WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam)
     case WM_TIMER:
         if (wParam == kPollTimerId)
         {
+            const auto oldCount = strips_.size();
+            const auto oldNextRowId = nextRowId_;
             Poll();
-            Layout();
+            if (strips_.size() != oldCount || nextRowId_ != oldNextRowId) Layout();
+            InvalidateRect(hwnd, nullptr, FALSE);
+        }
+        else if (wParam == kMeterTimerId)
+        {
+            AnimateMeters();
             InvalidateRect(hwnd, nullptr, FALSE);
         }
         return 0;
+
+    case kRouteWarningMessage:
+    {
+        const bool input = lParam != 0;
+        const auto it = std::find_if(strips_.begin(), strips_.end(),
+            [&](const ChannelStrip& strip) { return strip.rowId == static_cast<uint64_t>(wParam); });
+        if (it != strips_.end() && (input ? it->inputRouteWarningPending : it->routeWarningPending))
+        {
+            (input ? it->inputRouteWarningPending : it->routeWarningPending) = false;
+            const std::wstring message = it->name + (input ?
+                L" is still using another microphone. The Windows preference was saved.\n\n"
+                L"Set the microphone inside the app to System Default so WinMix can control it. "
+                L"If it already uses System Default, restart recording or the app." :
+                L" is still playing through another output. The Windows preference was saved.\n\n"
+                L"Set the audio output inside the app to System Default so WinMix can control it. "
+                L"If it already uses System Default, restart playback or the app.");
+            MessageBoxW(hwnd_, message.c_str(), input ? L"App has not switched input" : L"App has not switched output", MB_OK | MB_ICONINFORMATION);
+        }
+        return 0;
+    }
 
     case WM_ERASEBKGND:
         // D2D repaints the whole surface every frame; skip GDI's clear to
@@ -446,7 +489,9 @@ LRESULT MainWindow::WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam)
             mmi->ptMaxTrackSize.x = maxWidth;
         }
         mmi->ptMinTrackSize.x = minWidth;
-        mmi->ptMinTrackSize.y = minHeight;
+        RECT minimumClient{0, 0, minWidth, minHeight};
+        AdjustWindowRectExForDpi(&minimumClient, WS_OVERLAPPEDWINDOW, FALSE, 0, GetDpiForWindow(hwnd));
+        mmi->ptMinTrackSize.y = minimumClient.bottom - minimumClient.top;
         return 0;
     }
 
@@ -502,6 +547,7 @@ void MainWindow::CreateTextFormats()
     labelFormat_.Reset();
     nameFormat_.Reset();
     comboFormat_.Reset();
+    stripComboFormat_.Reset();
 
     auto* dwrite = resources_->DWriteFactory();
 
@@ -536,6 +582,14 @@ void MainWindow::CreateTextFormats()
     comboFormat_->SetParagraphAlignment(DWRITE_PARAGRAPH_ALIGNMENT_CENTER);
     comboFormat_->SetWordWrapping(DWRITE_WORD_WRAPPING_NO_WRAP);
     ApplyEllipsisTrimming(dwrite, comboFormat_.Get());
+
+    dwrite->CreateTextFormat(L"Segoe UI", nullptr, DWRITE_FONT_WEIGHT_NORMAL, DWRITE_FONT_STYLE_NORMAL,
+        DWRITE_FONT_STRETCH_NORMAL, 10.0f * dpiScale_, L"en-us", &stripComboFormat_);
+    stripComboFormat_->SetTextAlignment(DWRITE_TEXT_ALIGNMENT_LEADING);
+    stripComboFormat_->SetParagraphAlignment(DWRITE_PARAGRAPH_ALIGNMENT_CENTER);
+    stripComboFormat_->SetWordWrapping(DWRITE_WORD_WRAPPING_WRAP);
+    stripComboFormat_->SetLineSpacing(DWRITE_LINE_SPACING_METHOD_UNIFORM, 13.0f * dpiScale_, 10.0f * dpiScale_);
+    ApplyEllipsisTrimming(dwrite, stripComboFormat_.Get());
 }
 
 void MainWindow::Layout()
@@ -560,7 +614,7 @@ void MainWindow::Layout()
 
     masterFader_.SetScale(s);
     masterMute_.SetScale(s);
-    masterLayout_ = LayoutStrip(x, stripsTop, stripsHeight, masterFader_, masterMute_, nullptr, nullptr);
+    masterLayout_ = LayoutStrip(x, stripsTop, stripsHeight, masterFader_, masterMute_, nullptr, nullptr, nullptr);
     x += (kCardWidth + kCardMargin) * s;
 
     for (auto& strip : strips_)
@@ -570,9 +624,10 @@ void MainWindow::Layout()
         if (strip.outputCombo)
         {
             strip.outputCombo->SetScale(s);
+            strip.inputCombo->SetScale(s);
         }
         strip.layout = LayoutStrip(x, stripsTop, stripsHeight, strip.fader, strip.mute,
-                                    &strip.meter, strip.outputCombo.get());
+                                    &strip.meter, strip.outputCombo.get(), strip.inputCombo.get());
         x += (kCardWidth + kCardMargin) * s;
     }
 
@@ -631,7 +686,7 @@ void MainWindow::SyncWindowWidthToContent()
 
 StripLayout MainWindow::LayoutStrip(float left, float top, float height,
                                      controls::FaderControl& fader, controls::MuteToggle& mute,
-                                     controls::PeakMeter* meter, controls::ComboBox* outputCombo)
+                                     controls::PeakMeter* meter, controls::ComboBox* outputCombo, controls::ComboBox* inputCombo)
 {
     const float s = dpiScale_;
     const float cardWidth = kCardWidth * s;
@@ -655,7 +710,8 @@ StripLayout MainWindow::LayoutStrip(float left, float top, float height,
     // bottom, at any window height the user resizes to.
     const float belowFaderHeight =
         kRowGap + kLabelHeight + kRowGap + kMuteHeight + kRowGap +
-        (outputCombo ? kComboHeight + kRowGap : 0.0f) +
+        (outputCombo ? kDeviceLabelHeight + kDeviceLabelGap + kComboHeight + kRowGap : 0.0f) +
+        (inputCombo ? kDeviceLabelHeight + kDeviceLabelGap + kComboHeight + kRowGap : 0.0f) +
         (meter ? kMeterHeight + kRowGap : 0.0f) +
         kNameHeight + kCardPaddingBottom;
     const float faderHeight = std::max(kMinFaderHeight * s, height - (y - top) - belowFaderHeight * s);
@@ -677,12 +733,16 @@ StripLayout MainWindow::LayoutStrip(float left, float top, float height,
                                 left + (cardWidth + muteWidth) / 2.0f, y + muteHeight));
     y += muteHeight + kRowGap * s;
 
-    if (outputCombo)
+    auto layoutPicker = [&](controls::ComboBox* combo, D2D1_RECT_F& label)
     {
-        const float comboHeight = kComboHeight * s;
-        outputCombo->SetBounds(D2D1::RectF(cx0, y, cx1, y + comboHeight));
-        y += comboHeight + kRowGap * s;
-    }
+        if (!combo) return;
+        label = D2D1::RectF(cx0, y, cx1, y + kDeviceLabelHeight * s);
+        y += (kDeviceLabelHeight + kDeviceLabelGap) * s;
+        combo->SetBounds(D2D1::RectF(cx0, y, cx1, y + kComboHeight * s));
+        y += (kComboHeight + kRowGap) * s;
+    };
+    layoutPicker(outputCombo, layout.outputLabel);
+    layoutPicker(inputCombo, layout.inputLabel);
 
     if (meter)
     {
@@ -721,12 +781,14 @@ void MainWindow::Render()
         static_cast<float>(client.right), static_cast<float>(client.bottom));
     ctx->PushAxisAlignedClip(clip, D2D1_ANTIALIAS_MODE_ALIASED);
 
-    DrawStrip(masterLayout_, masterFader_, masterMute_, nullptr, nullptr, L"Device", true, std::nullopt, false);
+    DrawStrip(masterLayout_, masterFader_, masterMute_, nullptr, nullptr, nullptr, L"Device", true, std::nullopt, false);
 
     for (auto& strip : strips_)
     {
-        DrawStrip(strip.layout, strip.fader, strip.mute, &strip.meter, strip.outputCombo.get(),
-                  strip.name, strip.active, strip.executablePath, strip.isSystemSounds);
+        DrawStrip(strip.layout, strip.fader, strip.mute, &strip.meter,
+                  strip.isSystemSounds ? nullptr : strip.outputCombo.get(),
+                  strip.isSystemSounds ? nullptr : strip.inputCombo.get(),
+                  strip.name, strip.active, strip.executablePath, strip.isSystemSounds, strip.hasOutputSession);
     }
 
     ctx->PopAxisAlignedClip();
@@ -739,9 +801,9 @@ void MainWindow::Render()
 }
 
 void MainWindow::DrawStrip(const StripLayout& layout, controls::FaderControl& fader, controls::MuteToggle& mute,
-                            controls::PeakMeter* meter, controls::ComboBox* outputCombo,
+                            controls::PeakMeter* meter, controls::ComboBox* outputCombo, controls::ComboBox* inputCombo,
                             const std::wstring& name, bool active,
-                            const std::optional<std::wstring>& executablePath, bool isSystemSounds)
+                            const std::optional<std::wstring>& executablePath, bool isSystemSounds, bool hasOutputSession)
 {
     auto* ctx = resources_->Context();
 
@@ -781,18 +843,25 @@ void MainWindow::DrawStrip(const StripLayout& layout, controls::FaderControl& fa
         }
     }
 
-    fader.Draw(ctx, trackBrush_.Get(), accentBrush_.Get(), accentBrush_.Get(), accentHoverBrush_.Get(), windowRingBrush_.Get());
+    if (hasOutputSession) fader.Draw(ctx, trackBrush_.Get(), accentBrush_.Get(), accentBrush_.Get(), accentHoverBrush_.Get(), windowRingBrush_.Get());
 
     const int percent = static_cast<int>(std::lround(fader.Value() * 100.0));
-    const std::wstring percentText = std::to_wstring(percent) + L"%";
+    const std::wstring percentText = hasOutputSession ? std::to_wstring(percent) + L"%" : L"Input only";
     ctx->DrawText(percentText.c_str(), static_cast<UINT32>(percentText.size()), labelFormat_.Get(),
                   layout.percentLabel, textBrush_.Get(), D2D1_DRAW_TEXT_OPTIONS_CLIP);
 
-    mute.Draw(ctx, trackBrush_.Get(), textBrush_.Get(), mutedRedBrush_.Get());
+    if (hasOutputSession) mute.Draw(ctx, trackBrush_.Get(), textBrush_.Get(), mutedRedBrush_.Get());
 
     if (outputCombo)
     {
-        outputCombo->Draw(ctx, comboFormat_.Get(), panelBrush_.Get(), borderBrush_.Get(), textBrush_.Get(), subtleTextBrush_.Get());
+        ctx->DrawText(L"Output", 6, nameFormat_.Get(), layout.outputLabel, subtleTextBrush_.Get());
+        outputCombo->Draw(ctx, stripComboFormat_.Get(), panelBrush_.Get(), borderBrush_.Get(), textBrush_.Get(), subtleTextBrush_.Get());
+    }
+
+    if (inputCombo)
+    {
+        ctx->DrawText(L"Input", 5, nameFormat_.Get(), layout.inputLabel, subtleTextBrush_.Get());
+        inputCombo->Draw(ctx, stripComboFormat_.Get(), panelBrush_.Get(), borderBrush_.Get(), textBrush_.Get(), subtleTextBrush_.Get());
     }
 
     if (meter)
@@ -818,9 +887,10 @@ void MainWindow::OnLButtonDown(POINT pt)
 
     for (auto& strip : strips_)
     {
-        if (strip.outputCombo->HitTest(p)) { strip.outputCombo->OnClick(p); InvalidateRect(hwnd_, nullptr, FALSE); return; }
-        if (strip.mute.HitTest(p)) { strip.mute.OnClick(p); InvalidateRect(hwnd_, nullptr, FALSE); return; }
-        if (strip.fader.OnLButtonDown(p)) { draggingFader_ = &strip.fader; InvalidateRect(hwnd_, nullptr, FALSE); return; }
+        if (!strip.isSystemSounds && strip.outputCombo->HitTest(p)) { strip.outputCombo->OnClick(p); InvalidateRect(hwnd_, nullptr, FALSE); return; }
+        if (!strip.isSystemSounds && strip.inputCombo->HitTest(p)) { strip.inputCombo->OnClick(p); InvalidateRect(hwnd_, nullptr, FALSE); return; }
+        if (strip.hasOutputSession && strip.mute.HitTest(p)) { strip.mute.OnClick(p); InvalidateRect(hwnd_, nullptr, FALSE); return; }
+        if (strip.hasOutputSession && strip.fader.OnLButtonDown(p)) { draggingFader_ = &strip.fader; InvalidateRect(hwnd_, nullptr, FALSE); return; }
     }
 }
 
@@ -874,10 +944,12 @@ void MainWindow::Poll()
     try
     {
         const auto snapshots = audioService_.Refresh();
-        SyncMaster();
+        outputDevices_ = audioService_.ListOutputDevices();
+        inputDevices_ = audioService_.ListInputDevices();
         SyncOutputDevices();
         SyncInputDevices();
         ReconcileSessions(snapshots);
+        SyncMaster();
     }
     catch (const std::exception&)
     {
@@ -886,11 +958,19 @@ void MainWindow::Poll()
     }
 }
 
+void MainWindow::AnimateMeters()
+{
+    for (auto& strip : strips_)
+    {
+        strip.meter.Advance(kMeterFrameSeconds);
+    }
+}
+
 void MainWindow::SyncMaster()
 {
     const float deviceScalar = audioService_.GetMasterVolume();
     const float currentScalar = VolumeCurve::ToScalar(masterFader_.Value());
-    if (std::abs(currentScalar - deviceScalar) > kScalarEpsilon)
+    if (!masterFader_.IsDragging() && std::abs(currentScalar - deviceScalar) > kScalarEpsilon)
     {
         masterFader_.SetValue(VolumeCurve::ToPosition(deviceScalar));
     }
@@ -908,7 +988,7 @@ void MainWindow::SyncOutputDevices()
         return;
     }
 
-    const auto devices = audioService_.ListOutputDevices();
+    const auto& devices = outputDevices_;
     std::vector<std::wstring> items;
     items.reserve(devices.size());
     outputDeviceIds_.clear();
@@ -935,7 +1015,7 @@ void MainWindow::SyncInputDevices()
         return;
     }
 
-    const auto devices = audioService_.ListInputDevices();
+    const auto& devices = inputDevices_;
     std::vector<std::wstring> items;
     items.reserve(devices.size());
     inputDeviceIds_.clear();
@@ -968,6 +1048,11 @@ void MainWindow::ReconcileSessions(const std::vector<winmix::audio::AudioSession
     {
         if (!incomingIds.contains(it->instanceId))
         {
+            if (draggingFader_ == &it->fader)
+            {
+                OnLButtonUp({});
+                ReleaseCapture();
+            }
             it = strips_.erase(it);
         }
         else
@@ -975,12 +1060,6 @@ void MainWindow::ReconcileSessions(const std::vector<winmix::audio::AudioSession
             ++it;
         }
     }
-
-    // Reserved so every pointer taken into `present` below survives every
-    // push_back in this call. New rows go on the end (arrival order), never
-    // resorted -- re-sorting live would make cards jump around every time an
-    // app starts or stops producing sound.
-    strips_.reserve(snapshots.size());
 
     std::unordered_map<std::wstring, ChannelStrip*> present;
     present.reserve(strips_.size());
@@ -1005,67 +1084,186 @@ void MainWindow::ReconcileSessions(const std::vector<winmix::audio::AudioSession
 
 void MainWindow::SyncStrip(ChannelStrip& strip, const winmix::audio::AudioSessionSnapshot& snapshot)
 {
+    if (!snapshot.hasOutputSession && draggingFader_ == &strip.fader)
+    {
+        OnLButtonUp({});
+        ReleaseCapture();
+    }
+    strip.pid = snapshot.pid;
     strip.name = snapshot.displayName;
     strip.active = snapshot.IsActive();
+    strip.hasOutputSession = snapshot.hasOutputSession;
     strip.executablePath = snapshot.executablePath;
     strip.isSystemSounds = snapshot.isSystemSounds;
     strip.meter.SetLevel(snapshot.peakLevel);
     strip.mute.SetMuted(snapshot.isMuted);
+    if (snapshot.outputDeviceKnown) strip.outputDeviceId = snapshot.outputDeviceId;
+    if (snapshot.inputDeviceKnown) strip.inputDeviceId = snapshot.inputDeviceId;
+    SyncStripDevices(strip, false);
+    SyncStripDevices(strip, true);
+
+    if (strip.routeRequestedAt && !snapshot.activeOutputDeviceIds.empty())
+    {
+        auto target = strip.outputDeviceId;
+        if (!target)
+        {
+            const auto device = std::find_if(outputDevices_.begin(), outputDevices_.end(),
+                [](const auto& d) { return d.isDefault; });
+            if (device != outputDevices_.end()) target = device->id;
+        }
+        const bool switched = target && std::all_of(snapshot.activeOutputDeviceIds.begin(), snapshot.activeOutputDeviceIds.end(),
+            [&](const auto& id) { return id == *target; });
+        if (switched)
+        {
+            strip.routeRequestedAt = 0;
+        }
+        else if (GetTickCount64() - strip.routeRequestedAt >= 3000)
+        {
+            strip.routeRequestedAt = 0;
+            strip.routeWarningPending = true;
+            // A dialog pumps messages, so display it after reconciliation
+            // has finished and no iterator into the strip list is in use.
+            PostMessageW(hwnd_, kRouteWarningMessage, static_cast<WPARAM>(strip.rowId), 0);
+        }
+    }
+
+    if (strip.inputRouteRequestedAt && !snapshot.activeInputDeviceIds.empty())
+    {
+        const bool switched = strip.inputDeviceId && std::all_of(snapshot.activeInputDeviceIds.begin(), snapshot.activeInputDeviceIds.end(),
+            [&](const auto& id) { return id == *strip.inputDeviceId; });
+        if (switched) strip.inputRouteRequestedAt = 0;
+        else if (GetTickCount64() - strip.inputRouteRequestedAt >= 3000)
+        {
+            strip.inputRouteRequestedAt = 0;
+            strip.inputRouteWarningPending = true;
+            PostMessageW(hwnd_, kRouteWarningMessage, static_cast<WPARAM>(strip.rowId), 1);
+        }
+    }
 
     const float currentScalar = VolumeCurve::ToScalar(strip.fader.Value());
-    if (std::abs(currentScalar - snapshot.volume) > kScalarEpsilon)
+    if (!strip.fader.IsDragging() && std::abs(currentScalar - snapshot.volume) > kScalarEpsilon)
     {
         strip.fader.SetValue(VolumeCurve::ToPosition(snapshot.volume));
     }
 }
 
+void MainWindow::SyncStripDevices(ChannelStrip& strip, bool input)
+{
+    auto& combo = input ? strip.inputCombo : strip.outputCombo;
+    if (strip.isSystemSounds || combo->IsOpen()) return;
+    const auto& selectedDeviceId = input ? strip.inputDeviceId : strip.outputDeviceId;
+    const auto& devices = input ? inputDevices_ : outputDevices_;
+
+    std::vector<std::wstring> items{L"Default"};
+    std::vector<std::wstring> deviceIds;
+    for (const auto& device : devices)
+    {
+        items.push_back(device.friendlyName);
+        deviceIds.push_back(device.id);
+    }
+
+    int newIndex = 0;
+    if (selectedDeviceId)
+    {
+        const auto it = std::find(deviceIds.begin(), deviceIds.end(), *selectedDeviceId);
+        if (it != deviceIds.end())
+        {
+            newIndex = static_cast<int>(std::distance(deviceIds.begin(), it)) + 1;
+        }
+        else
+        {
+            items.push_back(L"Unavailable device");
+            deviceIds.push_back(*selectedDeviceId);
+            newIndex = static_cast<int>(deviceIds.size());
+        }
+    }
+
+    (input ? strip.inputDeviceIds : strip.outputDeviceIds) = std::move(deviceIds);
+    auto compactLabels = CompactDeviceLabels(items);
+    combo->SetItems(std::move(items), std::move(compactLabels));
+    combo->SetSelectedIndex(newIndex);
+}
+
+void MainWindow::ChangeStripDevice(uint64_t rowId, int index, bool input)
+{
+    const auto it = std::find_if(strips_.begin(), strips_.end(),
+        [&](const ChannelStrip& strip) { return strip.rowId == rowId; });
+    if (it == strips_.end()) return;
+    const auto& ids = input ? it->inputDeviceIds : it->outputDeviceIds;
+    if (index < 0 || index > static_cast<int>(ids.size())) return;
+    const std::optional<std::wstring> deviceId = index ? std::optional<std::wstring>(ids[index - 1]) : std::nullopt;
+    try
+    {
+        if (input)
+        {
+            it->inputRouteWarningPending = false;
+            audioService_.SetAppInputDevice(it->instanceId, deviceId);
+            it->inputDeviceId = deviceId;
+            it->inputRouteRequestedAt = deviceId ? GetTickCount64() : 0;
+        }
+        else
+        {
+            it->routeWarningPending = false;
+            audioService_.SetAppOutputDevice(it->instanceId, deviceId);
+            it->outputDeviceId = deviceId;
+            it->routeRequestedAt = GetTickCount64();
+        }
+    }
+    catch (const std::exception& ex)
+    {
+        SyncStripDevices(*it, input);
+        const std::string message = ex.what();
+        const std::wstring detail(message.begin(), message.end());
+        MessageBoxW(hwnd_, detail.c_str(), input ? L"Could not switch input" : L"Could not switch output", MB_OK | MB_ICONERROR);
+    }
+    InvalidateRect(hwnd_, nullptr, FALSE);
+}
+
 ChannelStrip MainWindow::CreateStrip(const winmix::audio::AudioSessionSnapshot& snapshot)
 {
     ChannelStrip strip;
+    strip.rowId = nextRowId_++;
     strip.instanceId = snapshot.instanceId;
     strip.pid = snapshot.pid;
     strip.name = snapshot.displayName;
     strip.active = snapshot.IsActive();
+    strip.hasOutputSession = snapshot.hasOutputSession;
     strip.executablePath = snapshot.executablePath;
     strip.isSystemSounds = snapshot.isSystemSounds;
     strip.fader.SetValue(VolumeCurve::ToPosition(snapshot.volume));
     strip.mute.SetMuted(snapshot.isMuted);
     strip.meter.SetLevel(snapshot.peakLevel);
 
-    // "Default" (index 0, no pin) followed by every active render device.
-    // Populated once at creation, not refreshed every poll -- a device
-    // plugged in after this session started won't appear until the row is
-    // recreated, a corner case not worth the extra per-strip bookkeeping.
-    std::vector<std::wstring> items{L"Default"};
-    std::vector<std::wstring> deviceIds;
-    for (const auto& device : audioService_.ListOutputDevices())
-    {
-        items.push_back(device.friendlyName);
-        deviceIds.push_back(device.id);
-    }
-
     strip.outputCombo = std::make_unique<controls::ComboBox>(hwnd_);
-    strip.outputCombo->SetItems(std::move(items));
-    strip.outputCombo->SetSelectedIndex(0);
-    strip.outputCombo->onChange = [this, pid = strip.pid, deviceIds](int index)
-    {
-        // index 0 is "Default" -> clear the pin (nullopt); index i>=1 maps
-        // to deviceIds[i - 1].
-        const std::optional<std::wstring> deviceId =
-            (index >= 1 && index - 1 < static_cast<int>(deviceIds.size()))
-                ? std::optional<std::wstring>(deviceIds[index - 1])
-                : std::nullopt;
-        audioService_.SetAppOutputDevice(pid, deviceId);
-    };
+    strip.inputCombo = std::make_unique<controls::ComboBox>(hwnd_);
+    strip.outputDeviceId = snapshot.outputDeviceId;
+    strip.inputDeviceId = snapshot.inputDeviceId;
+    SyncStripDevices(strip, false);
+    SyncStripDevices(strip, true);
 
-    const std::wstring instanceId = strip.instanceId;
-    strip.fader.onChange = [this, instanceId](double position)
+    const uint64_t rowId = strip.rowId;
+    strip.outputCombo->onChange = [this, rowId](int index) { ChangeStripDevice(rowId, index, false); };
+    strip.inputCombo->onChange = [this, rowId](int index) { ChangeStripDevice(rowId, index, true); };
+
+    strip.fader.onChange = [this, rowId](double position)
     {
-        audioService_.SetVolume(instanceId, VolumeCurve::ToScalar(position));
+        const auto it = std::find_if(strips_.begin(), strips_.end(),
+                                      [&](const ChannelStrip& s) { return s.rowId == rowId; });
+        if (it == strips_.end())
+        {
+            return;
+        }
+        audioService_.SetVolume(it->instanceId, VolumeCurve::ToScalar(position));
     };
-    strip.mute.onChange = [this, instanceId](bool muted)
+    strip.mute.onChange = [this, rowId](bool muted)
     {
-        audioService_.SetMute(instanceId, muted);
+        const auto it = std::find_if(strips_.begin(), strips_.end(),
+                                      [&](const ChannelStrip& s) { return s.rowId == rowId; });
+        if (it == strips_.end())
+        {
+            return;
+        }
+        audioService_.SetMute(it->instanceId, muted);
     };
 
     return strip;

@@ -3,6 +3,7 @@
 #include <cstdint>
 #include <optional>
 #include <string>
+#include <vector>
 
 namespace winmix::audio {
 
@@ -23,13 +24,27 @@ enum class SessionState
 // letting a view model reach into one past its refresh invites
 // use-after-release.
 //
-// instanceId is unique per session instance -- two windows of the same app
-// share a session identifier but get distinct instance ids, so this is what
-// callers key on. volume is a WASAPI amplitude scalar in 0..1, not a slider
-// position (see VolumeCurve).
+// Raw enumeration uses the WASAPI instance ID; service results use a stable
+// app key and carry the current session IDs separately. Volume is a WASAPI
+// amplitude scalar in 0..1, not a slider position (see VolumeCurve).
 struct AudioSessionSnapshot
 {
     std::wstring instanceId;
+    // Populated for app snapshots returned by the service. instanceId is
+    // then a stable app key; these are the current WASAPI session IDs/PIDs.
+    std::vector<std::wstring> sessionInstanceIds;
+    std::vector<std::wstring> inputSessionInstanceIds;
+    std::vector<uint32_t> processIds;
+    std::vector<uint32_t> inputProcessIds;
+    std::vector<std::wstring> activeOutputDeviceIds;
+    std::vector<std::wstring> activeInputDeviceIds;
+    std::optional<std::wstring> outputDeviceId;
+    bool outputDeviceKnown = false;
+    std::optional<std::wstring> inputDeviceId;
+    bool inputDeviceKnown = false;
+    // Raw capture snapshots set this false. In groups it means there is
+    // playback to control; microphone sessions never drive output volume.
+    bool hasOutputSession = true;
     uint32_t pid = 0;
     std::wstring displayName;
     std::optional<std::wstring> executablePath;
