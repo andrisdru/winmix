@@ -10,7 +10,8 @@ constexpr UINT_PTR kMenuOpenId = 1;
 constexpr UINT_PTR kMenuExitId = 2;
 constexpr UINT_PTR kMenuAutostartId = 3;
 constexpr UINT_PTR kMenuVersionId = 4; // disabled -- never actually selectable
-constexpr UINT_PTR kMenuInputDeviceBase = 100; // + index into the current device list
+constexpr UINT_PTR kMenuOutputDeviceBase = 100; // + index into the current device list
+constexpr UINT_PTR kMenuInputDeviceBase = 200; // + index into the current device list
 } // namespace
 
 TrayIcon::TrayIcon(HWND owner, UINT callbackMessage, HICON icon)
@@ -63,7 +64,25 @@ void TrayIcon::ShowContextMenu()
     AppendMenuW(menu, MF_STRING, kMenuOpenId, L"Open");
     AppendMenuW(menu, MF_SEPARATOR, 0, nullptr);
 
-    const std::vector<TrayInputDevice> devices = listInputDevices ? listInputDevices() : std::vector<TrayInputDevice>{};
+    const std::vector<TrayDevice> outputDevices = listOutputDevices ? listOutputDevices() : std::vector<TrayDevice>{};
+
+    HMENU outputMenu = CreatePopupMenu();
+    for (size_t i = 0; i < outputDevices.size(); ++i)
+    {
+        const UINT flags = MF_STRING | (outputDevices[i].isDefault ? MF_CHECKED : 0u);
+        AppendMenuW(outputMenu, flags, kMenuOutputDeviceBase + i, outputDevices[i].friendlyName.c_str());
+    }
+
+    if (!outputDevices.empty())
+    {
+        AppendMenuW(menu, MF_POPUP, reinterpret_cast<UINT_PTR>(outputMenu), L"Output");
+    }
+    else
+    {
+        DestroyMenu(outputMenu);
+    }
+
+    const std::vector<TrayDevice> devices = listInputDevices ? listInputDevices() : std::vector<TrayDevice>{};
 
     HMENU inputMenu = CreatePopupMenu();
     for (size_t i = 0; i < devices.size(); ++i)
@@ -129,8 +148,16 @@ void TrayIcon::ShowContextMenu()
             setDefaultInputDevice(devices[index].id);
         }
     }
+    else if (selected >= static_cast<int>(kMenuOutputDeviceBase))
+    {
+        const size_t index = static_cast<size_t>(selected) - kMenuOutputDeviceBase;
+        if (index < outputDevices.size() && setDefaultOutputDevice)
+        {
+            setDefaultOutputDevice(outputDevices[index].id);
+        }
+    }
 
-    DestroyMenu(menu); // recursively destroys the attached input submenu too
+    DestroyMenu(menu); // recursively destroys the attached output/input submenus too
 }
 
 } // namespace winmix::app

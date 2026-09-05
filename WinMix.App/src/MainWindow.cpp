@@ -172,6 +172,17 @@ MainWindow::MainWindow(HINSTANCE hInstance)
     tray_ = std::make_unique<TrayIcon>(hwnd_, kTrayCallbackMessage, appIcon);
     tray_->onOpen = [this]() { ShowMixer(); };
     tray_->onExit = [this]() { PostQuitMessage(0); };
+    tray_->listOutputDevices = [this]() { return ListOutputDevicesForTray(); };
+    tray_->setDefaultOutputDevice = [this](const std::wstring& id)
+    {
+        try
+        {
+            audioService_.SetDefaultOutputDevice(id);
+        }
+        catch (const std::exception&)
+        {
+        }
+    };
     tray_->listInputDevices = [this]() { return ListInputDevicesForTray(); };
     tray_->setDefaultInputDevice = [this](const std::wstring& id)
     {
@@ -313,14 +324,30 @@ void MainWindow::StopPolling()
     KillTimer(hwnd_, kMeterTimerId);
 }
 
-std::vector<TrayInputDevice> MainWindow::ListInputDevicesForTray()
+std::vector<TrayDevice> MainWindow::ListOutputDevicesForTray()
 {
-    std::vector<TrayInputDevice> result;
+    std::vector<TrayDevice> result;
+    try
+    {
+        for (const auto& d : audioService_.ListOutputDevices())
+        {
+            result.push_back(TrayDevice{d.id, d.friendlyName, d.isDefault});
+        }
+    }
+    catch (const std::exception&)
+    {
+    }
+    return result;
+}
+
+std::vector<TrayDevice> MainWindow::ListInputDevicesForTray()
+{
+    std::vector<TrayDevice> result;
     try
     {
         for (const auto& d : audioService_.ListInputDevices())
         {
-            result.push_back(TrayInputDevice{d.id, d.friendlyName, d.isDefault});
+            result.push_back(TrayDevice{d.id, d.friendlyName, d.isDefault});
         }
     }
     catch (const std::exception&)

@@ -127,7 +127,8 @@ private:
     void ShowMixer();
     void StartPolling();
     void StopPolling();
-    std::vector<TrayInputDevice> ListInputDevicesForTray();
+    std::vector<TrayDevice> ListOutputDevicesForTray();
+    std::vector<TrayDevice> ListInputDevicesForTray();
 
     HWND hwnd_ = nullptr;
     std::unique_ptr<render::DeviceResources> resources_;
