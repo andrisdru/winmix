@@ -76,10 +76,35 @@ MainWindow::MainWindow(HINSTANCE hInstance)
     CreateTextFormats();
 
     outputCombo_ = std::make_unique<controls::ComboBox>(hwnd_);
+    outputCombo_->onChange = [this](int index)
+    {
+        if (index >= 0 && index < static_cast<int>(outputDeviceIds_.size()))
+        {
+            try
+            {
+                audioService_.SetDefaultOutputDevice(outputDeviceIds_[index]);
+            }
+            catch (const std::exception&)
+            {
+            }
+        }
+    };
+
     inputCombo_ = std::make_unique<controls::ComboBox>(hwnd_);
-    // Device-switching (both boxes) lands in a later stage alongside
-    // PolicyConfigInterop; for now they display real devices but selecting
-    // one has no effect. Real items are populated by the first Poll() below.
+    inputCombo_->onChange = [this](int index)
+    {
+        if (index >= 0 && index < static_cast<int>(inputDeviceIds_.size()))
+        {
+            try
+            {
+                audioService_.SetDefaultInputDevice(inputDeviceIds_[index]);
+            }
+            catch (const std::exception&)
+            {
+            }
+        }
+    };
+    // Real items are populated by the first Poll() below.
 
     // User-driven only -- SetValue() (used when a poll adopts the device's
     // own value) deliberately does not invoke onChange, so there is no risk
@@ -529,10 +554,13 @@ void MainWindow::SyncOutputDevices()
     const auto devices = audioService_.ListOutputDevices();
     std::vector<std::wstring> items;
     items.reserve(devices.size());
+    outputDeviceIds_.clear();
+    outputDeviceIds_.reserve(devices.size());
     int defaultIndex = 0;
     for (size_t i = 0; i < devices.size(); ++i)
     {
         items.push_back(devices[i].friendlyName);
+        outputDeviceIds_.push_back(devices[i].id);
         if (devices[i].isDefault)
         {
             defaultIndex = static_cast<int>(i);
@@ -553,10 +581,13 @@ void MainWindow::SyncInputDevices()
     const auto devices = audioService_.ListInputDevices();
     std::vector<std::wstring> items;
     items.reserve(devices.size());
+    inputDeviceIds_.clear();
+    inputDeviceIds_.reserve(devices.size());
     int defaultIndex = 0;
     for (size_t i = 0; i < devices.size(); ++i)
     {
         items.push_back(devices[i].friendlyName);
+        inputDeviceIds_.push_back(devices[i].id);
         if (devices[i].isDefault)
         {
             defaultIndex = static_cast<int>(i);
@@ -633,15 +664,38 @@ ChannelStrip MainWindow::CreateStrip(const winmix::audio::AudioSessionSnapshot& 
 {
     ChannelStrip strip;
     strip.instanceId = snapshot.instanceId;
+    strip.pid = snapshot.pid;
     strip.name = snapshot.displayName;
     strip.active = snapshot.IsActive();
     strip.fader.SetValue(VolumeCurve::ToPosition(snapshot.volume));
     strip.mute.SetMuted(snapshot.isMuted);
     strip.meter.SetLevel(snapshot.peakLevel);
 
+    // "Default" (index 0, no pin) followed by every active render device.
+    // Populated once at creation, not refreshed every poll -- a device
+    // plugged in after this session started won't appear until the row is
+    // recreated, a corner case not worth the extra per-strip bookkeeping.
+    std::vector<std::wstring> items{L"Default"};
+    std::vector<std::wstring> deviceIds;
+    for (const auto& device : audioService_.ListOutputDevices())
+    {
+        items.push_back(device.friendlyName);
+        deviceIds.push_back(device.id);
+    }
+
     strip.outputCombo = std::make_unique<controls::ComboBox>(hwnd_);
-    strip.outputCombo->SetItems({L"Default"}); // per-app routing lands with AppOutputRouter later
+    strip.outputCombo->SetItems(std::move(items));
     strip.outputCombo->SetSelectedIndex(0);
+    strip.outputCombo->onChange = [this, pid = strip.pid, deviceIds](int index)
+    {
+        // index 0 is "Default" -> clear the pin (nullopt); index i>=1 maps
+        // to deviceIds[i - 1].
+        const std::optional<std::wstring> deviceId =
+            (index >= 1 && index - 1 < static_cast<int>(deviceIds.size()))
+                ? std::optional<std::wstring>(deviceIds[index - 1])
+                : std::nullopt;
+        audioService_.SetAppOutputDevice(pid, deviceId);
+    };
 
     const std::wstring instanceId = strip.instanceId;
     strip.fader.onChange = [this, instanceId](double position)

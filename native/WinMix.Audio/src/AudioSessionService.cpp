@@ -1,4 +1,6 @@
 #include "winmix/audio/AudioSessionService.h"
+#include "winmix/audio/AppOutputRouter.h"
+#include "winmix/audio/PolicyConfigInterop.h"
 #include "winmix/audio/SessionNaming.h"
 
 #include <endpointvolume.h>
@@ -308,6 +310,25 @@ std::vector<AudioDeviceInfo> AudioSessionService::ListOutputDevices()
     return devices;
 }
 
+void AudioSessionService::SetDefaultOutputDevice(const std::wstring& deviceId)
+{
+    Guarded([&]()
+    {
+        ThrowIfFailed(DefaultEndpointSwitcher::SetDefault(deviceId), "SetDefault(output)");
+    });
+
+    // The device we already resolved is still Active, just no longer
+    // default -- drop it so the next Device() call re-resolves to the new
+    // default instead of quietly continuing to mix the old one.
+    ReleaseControls();
+    device_.Reset();
+}
+
+void AudioSessionService::SetAppOutputDevice(uint32_t pid, const std::optional<std::wstring>& deviceId)
+{
+    AppOutputRouter::Set(pid, deviceId);
+}
+
 std::vector<AudioDeviceInfo> AudioSessionService::ListInputDevices()
 {
     std::optional<std::wstring> defaultId;
@@ -350,6 +371,14 @@ std::vector<AudioDeviceInfo> AudioSessionService::ListInputDevices()
     }
 
     return devices;
+}
+
+void AudioSessionService::SetDefaultInputDevice(const std::wstring& deviceId)
+{
+    Guarded([&]()
+    {
+        ThrowIfFailed(DefaultEndpointSwitcher::SetDefault(deviceId), "SetDefault(input)");
+    });
 }
 
 std::wstring AudioSessionService::ChooseDisplayName(IAudioSessionControl2* control, const ProcessInfo& info, bool isSystemSounds)

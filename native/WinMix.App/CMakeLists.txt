@@ -6,11 +6,17 @@ add_executable(winmix_app WIN32
     src/controls/PeakMeter.cpp
     src/controls/MuteToggle.cpp
     src/controls/ComboBox.cpp
+    resources/WinMix.rc
 )
 
 set_target_properties(winmix_app PROPERTIES
     OUTPUT_NAME "WinMixCpp"
 )
+
+# WinMix.rc embeds our own hand-authored manifest as resource ID 1
+# (CREATEPROCESS_MANIFEST_RESOURCE_ID); without /MANIFEST:NO the linker's own
+# auto-generated manifest collides with it at the same resource ID.
+target_link_options(winmix_app PRIVATE /MANIFEST:NO)
 
 target_include_directories(winmix_app PRIVATE
     ${CMAKE_CURRENT_SOURCE_DIR}/src

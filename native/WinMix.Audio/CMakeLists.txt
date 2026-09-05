@@ -3,6 +3,9 @@ add_library(winmix_audio STATIC
     src/ProcessInfoCache.cpp
     src/SessionNaming.cpp
     src/AudioSessionService.cpp
+    src/AudioPolicyConfigFactory.cpp
+    src/AppOutputRouter.cpp
+    src/PolicyConfigInterop.cpp
 )
 
 target_include_directories(winmix_audio PUBLIC
@@ -24,4 +27,5 @@ target_link_libraries(winmix_audio PUBLIC
     shlwapi
     version
     propsys
+    runtimeobject
 )

@@ -37,6 +37,7 @@ struct StripLayout
 struct ChannelStrip
 {
     std::wstring instanceId;
+    uint32_t pid = 0;
     std::wstring name;
     bool active = false;
 
@@ -117,6 +118,10 @@ private:
     StripLayout masterLayout_;
     std::unique_ptr<controls::ComboBox> outputCombo_;
     std::unique_ptr<controls::ComboBox> inputCombo_;
+    // outputCombo_/inputCombo_ items map 1:1 to these (no "Default" sentinel
+    // at the header level -- one of these is always the actual default).
+    std::vector<std::wstring> outputDeviceIds_;
+    std::vector<std::wstring> inputDeviceIds_;
     std::vector<ChannelStrip> strips_;
 
     float scrollOffsetX_ = 0.0f;

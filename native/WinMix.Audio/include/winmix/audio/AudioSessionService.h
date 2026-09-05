@@ -32,9 +32,6 @@ namespace winmix::audio {
 // re-entering the session manager from inside one deadlocks. Polling at a
 // couple of hertz sidesteps that entirely and is imperceptible for a mixer.
 //
-// Per-app/system output-device switching (AppOutputRouter,
-// PolicyConfigInterop) lands in a later stage -- this class currently only
-// reads/enumerates devices and controls per-session and master volume.
 class AudioSessionService
 {
 public:
@@ -65,8 +62,22 @@ public:
     // Active render endpoints, for the output-device picker.
     std::vector<AudioDeviceInfo> ListOutputDevices();
 
+    // Makes deviceId the system default render device, for every role, so
+    // both this mixer and every other app follow it.
+    void SetDefaultOutputDevice(const std::wstring& deviceId);
+
+    // Pins one app's output to deviceId, or with nullopt clears the pin so
+    // it follows the system default again.
+    void SetAppOutputDevice(uint32_t pid, const std::optional<std::wstring>& deviceId);
+
     // Active capture endpoints (microphones), for the input-device picker.
     std::vector<AudioDeviceInfo> ListInputDevices();
+
+    // Makes deviceId the system default capture device, for every role --
+    // the same mechanism as SetDefaultOutputDevice, just pointed at a
+    // microphone. Unlike the render side, no session state depends on which
+    // capture device is default, so there is nothing to re-resolve after.
+    void SetDefaultInputDevice(const std::wstring& deviceId);
 
 private:
     IMMDevice* Device();
