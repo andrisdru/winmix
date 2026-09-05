@@ -6,6 +6,7 @@
 #include <dwrite.h>
 
 #include <memory>
+#include <optional>
 #include <string>
 #include <vector>
 
@@ -14,6 +15,8 @@
 #include "controls/PeakMeter.h"
 #include "controls/MuteToggle.h"
 #include "controls/ComboBox.h"
+#include "IconLoader.h"
+#include "TrayIcon.h"
 
 #include "winmix/audio/AudioSessionService.h"
 
@@ -40,6 +43,8 @@ struct ChannelStrip
     uint32_t pid = 0;
     std::wstring name;
     bool active = false;
+    std::optional<std::wstring> executablePath;
+    bool isSystemSounds = false;
 
     controls::FaderControl fader;
     controls::MuteToggle mute;
@@ -73,7 +78,8 @@ private:
     void Render();
     void DrawStrip(const StripLayout& layout, controls::FaderControl& fader, controls::MuteToggle& mute,
                     controls::PeakMeter* meter, controls::ComboBox* outputCombo,
-                    const std::wstring& name, bool active);
+                    const std::wstring& name, bool active,
+                    const std::optional<std::wstring>& executablePath, bool isSystemSounds);
 
     void OnLButtonDown(POINT pt);
     void OnMouseMove(POINT pt);
@@ -92,6 +98,15 @@ private:
     void ReconcileSessions(const std::vector<winmix::audio::AudioSessionSnapshot>& snapshots);
     void SyncStrip(ChannelStrip& strip, const winmix::audio::AudioSessionSnapshot& snapshot);
     ChannelStrip CreateStrip(const winmix::audio::AudioSessionSnapshot& snapshot);
+
+    // Tray-driven lifecycle: polling only runs while the window is visible
+    // (worth it -- there is nothing to animate while hidden, so the COM
+    // traffic would be pure waste), matching AudioSessionService.Stop()/
+    // Start() in the .NET port.
+    void ShowMixer();
+    void StartPolling();
+    void StopPolling();
+    std::vector<TrayInputDevice> ListInputDevicesForTray();
 
     HWND hwnd_ = nullptr;
     std::unique_ptr<render::DeviceResources> resources_;
@@ -112,6 +127,9 @@ private:
     Microsoft::WRL::ComPtr<IDWriteTextFormat> comboFormat_;
 
     winmix::audio::AudioSessionService audioService_;
+    IconLoader iconLoader_;
+    std::unique_ptr<TrayIcon> tray_;
+    bool timerRunning_ = false;
 
     controls::FaderControl masterFader_;
     controls::MuteToggle masterMute_;

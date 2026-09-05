@@ -1,6 +1,8 @@
 add_executable(winmix_app WIN32
     src/WinMain.cpp
     src/MainWindow.cpp
+    src/TrayIcon.cpp
+    src/IconLoader.cpp
     src/render/DeviceResources.cpp
     src/controls/FaderControl.cpp
     src/controls/PeakMeter.cpp
@@ -20,6 +22,7 @@ target_link_options(winmix_app PRIVATE /MANIFEST:NO)
 
 target_include_directories(winmix_app PRIVATE
     ${CMAKE_CURRENT_SOURCE_DIR}/src
+    ${CMAKE_CURRENT_SOURCE_DIR}/resources
 )
 
 target_compile_definitions(winmix_app PRIVATE
@@ -36,6 +39,8 @@ target_link_libraries(winmix_app PRIVATE
     winmix_audio
     user32
     gdi32
+    shell32
+    dwmapi
     d3d11
     dxgi
     d2d1

@@ -1,9 +1,11 @@
 #include "MainWindow.h"
 #include "Theme.h"
+#include "resource.h"
 
 #include "winmix/audio/VolumeCurve.h"
 
 #include <windowsx.h>
+#include <dwmapi.h>
 
 #include <algorithm>
 #include <cmath>
@@ -49,6 +51,14 @@ constexpr UINT kPollIntervalMs = 100;
 // every poll would yank the fader out from under a live drag.
 constexpr float kScalarEpsilon = 0.01f;
 
+// Content-driven width, capped in WM_GETMINMAXINFO; height stays freely
+// resizable (see WM_NCHITTEST below).
+constexpr LONG kMinWidth = 300;
+constexpr LONG kMinHeight = 360;
+constexpr LONG kMaxWidthMargin = 60;
+
+constexpr UINT kTrayCallbackMessage = WM_APP + 1;
+
 } // namespace
 
 MainWindow::MainWindow(HINSTANCE hInstance)
@@ -71,9 +81,31 @@ MainWindow::MainWindow(HINSTANCE hInstance)
         throw std::runtime_error("CreateWindowExW failed");
     }
 
+    const HICON appIcon = LoadIconW(hInstance, MAKEINTRESOURCE(IDI_APPICON));
+    SendMessageW(hwnd_, WM_SETICON, ICON_SMALL, reinterpret_cast<LPARAM>(appIcon));
+    SendMessageW(hwnd_, WM_SETICON, ICON_BIG, reinterpret_cast<LPARAM>(appIcon));
+
+    BOOL useDarkMode = TRUE;
+    DwmSetWindowAttribute(hwnd_, DWMWA_USE_IMMERSIVE_DARK_MODE, &useDarkMode, sizeof(useDarkMode));
+
     resources_ = std::make_unique<render::DeviceResources>(hwnd_);
     CreateBrushes();
     CreateTextFormats();
+
+    tray_ = std::make_unique<TrayIcon>(hwnd_, kTrayCallbackMessage, appIcon);
+    tray_->onOpen = [this]() { ShowMixer(); };
+    tray_->onExit = [this]() { PostQuitMessage(0); };
+    tray_->listInputDevices = [this]() { return ListInputDevicesForTray(); };
+    tray_->setDefaultInputDevice = [this](const std::wstring& id)
+    {
+        try
+        {
+            audioService_.SetDefaultInputDevice(id);
+        }
+        catch (const std::exception&)
+        {
+        }
+    };
 
     outputCombo_ = std::make_unique<controls::ComboBox>(hwnd_);
     outputCombo_->onChange = [this](int index)
@@ -132,17 +164,15 @@ MainWindow::MainWindow(HINSTANCE hInstance)
         }
     };
 
-    Poll();
     Layout();
-
-    SetTimer(hwnd_, kPollTimerId, kPollIntervalMs, nullptr);
 }
 
 MainWindow::~MainWindow()
 {
     if (hwnd_)
     {
-        KillTimer(hwnd_, kPollTimerId);
+        StopPolling();
+        tray_.reset(); // remove the tray icon before the window (and its HICON) go away
         DestroyWindow(hwnd_);
     }
 }
@@ -151,6 +181,56 @@ void MainWindow::Show(int cmdShow)
 {
     ShowWindow(hwnd_, cmdShow);
     UpdateWindow(hwnd_);
+    StartPolling();
+}
+
+void MainWindow::ShowMixer()
+{
+    ShowWindow(hwnd_, IsIconic(hwnd_) ? SW_RESTORE : SW_SHOW);
+    SetForegroundWindow(hwnd_);
+    scrollOffsetX_ = 0.0f; // land on the master strip, matching the .NET port's ShowMixer
+    StartPolling();
+    Layout();
+    InvalidateRect(hwnd_, nullptr, FALSE);
+}
+
+void MainWindow::StartPolling()
+{
+    if (timerRunning_)
+    {
+        return;
+    }
+    timerRunning_ = true;
+    SetTimer(hwnd_, kPollTimerId, kPollIntervalMs, nullptr);
+    Poll();
+    Layout();
+    InvalidateRect(hwnd_, nullptr, FALSE);
+}
+
+void MainWindow::StopPolling()
+{
+    if (!timerRunning_)
+    {
+        return;
+    }
+    timerRunning_ = false;
+    KillTimer(hwnd_, kPollTimerId);
+}
+
+std::vector<TrayInputDevice> MainWindow::ListInputDevicesForTray()
+{
+    std::vector<TrayInputDevice> result;
+    try
+    {
+        for (const auto& d : audioService_.ListInputDevices())
+        {
+            result.push_back(TrayInputDevice{d.id, d.friendlyName, d.isDefault});
+        }
+    }
+    catch (const std::exception&)
+    {
+    }
+    return result;
 }
 
 int MainWindow::RunMessageLoop()
@@ -239,11 +319,68 @@ LRESULT MainWindow::WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam)
         // avoid a flicker/flash between the two.
         return 1;
 
+    case WM_NCHITTEST:
+    {
+        // Blocks manual width resizing (dragging left/right edges or
+        // corners) while leaving height freely resizable via the top/bottom
+        // edges -- matches the .NET port's WindowResize.cs exactly, just
+        // without needing to hand-redeclare the HT* constants (they come
+        // straight from <winuser.h> here).
+        const LRESULT result = DefWindowProcW(hwnd, msg, wParam, lParam);
+        switch (result)
+        {
+        case HTLEFT:
+        case HTRIGHT:
+        case HTTOPLEFT:
+        case HTTOPRIGHT:
+        case HTBOTTOMLEFT:
+        case HTBOTTOMRIGHT:
+            return HTBORDER;
+        default:
+            return result;
+        }
+    }
+
+    case WM_GETMINMAXINFO:
+    {
+        auto* mmi = reinterpret_cast<MINMAXINFO*>(lParam);
+        // The window's *current* monitor, not the primary -- a long session
+        // list should be able to use the full width of whichever screen the
+        // window actually lives on.
+        HMONITOR monitor = MonitorFromWindow(hwnd, MONITOR_DEFAULTTONEAREST);
+        MONITORINFO mi{};
+        mi.cbSize = sizeof(mi);
+        if (GetMonitorInfoW(monitor, &mi))
+        {
+            const LONG maxWidth = std::max(kMinWidth, (mi.rcWork.right - mi.rcWork.left) - kMaxWidthMargin);
+            mmi->ptMaxTrackSize.x = maxWidth;
+        }
+        mmi->ptMinTrackSize.x = kMinWidth;
+        mmi->ptMinTrackSize.y = kMinHeight;
+        return 0;
+    }
+
+    case WM_CLOSE:
+        // The X button / Alt+F4 never exits the process -- only the tray
+        // menu's Exit does. Stop polling while hidden: there is nothing to
+        // animate, so the COM traffic would be pure waste.
+        StopPolling();
+        ShowWindow(hwnd, SW_HIDE);
+        return 0;
+
     case WM_DESTROY:
         PostQuitMessage(0);
         return 0;
 
     default:
+        if (msg == kTrayCallbackMessage)
+        {
+            if (tray_)
+            {
+                tray_->OnCallback(lParam);
+            }
+            return 0;
+        }
         return DefWindowProcW(hwnd, msg, wParam, lParam);
     }
 }
@@ -379,12 +516,12 @@ void MainWindow::Render()
         static_cast<float>(client.right), static_cast<float>(client.bottom));
     ctx->PushAxisAlignedClip(clip, D2D1_ANTIALIAS_MODE_ALIASED);
 
-    DrawStrip(masterLayout_, masterFader_, masterMute_, nullptr, nullptr, L"Device", true);
+    DrawStrip(masterLayout_, masterFader_, masterMute_, nullptr, nullptr, L"Device", true, std::nullopt, false);
 
     for (auto& strip : strips_)
     {
         DrawStrip(strip.layout, strip.fader, strip.mute, &strip.meter, strip.outputCombo.get(),
-                  strip.name, strip.active);
+                  strip.name, strip.active, strip.executablePath, strip.isSystemSounds);
     }
 
     ctx->PopAxisAlignedClip();
@@ -398,7 +535,8 @@ void MainWindow::Render()
 
 void MainWindow::DrawStrip(const StripLayout& layout, controls::FaderControl& fader, controls::MuteToggle& mute,
                             controls::PeakMeter* meter, controls::ComboBox* outputCombo,
-                            const std::wstring& name, bool active)
+                            const std::wstring& name, bool active,
+                            const std::optional<std::wstring>& executablePath, bool isSystemSounds)
 {
     auto* ctx = resources_->Context();
 
@@ -412,16 +550,30 @@ void MainWindow::DrawStrip(const StripLayout& layout, controls::FaderControl& fa
     layerParams.opacity = active ? 1.0f : 0.5f;
     ctx->PushLayer(layerParams, nullptr);
 
-    const float iconCx = (layout.icon.left + layout.icon.right) / 2.0f;
-    const float iconCy = (layout.icon.top + layout.icon.bottom) / 2.0f;
-    ctx->FillEllipse(
-        D2D1::Ellipse(D2D1::Point2F(iconCx, iconCy), (layout.icon.right - layout.icon.left) / 2.0f,
-                      (layout.icon.bottom - layout.icon.top) / 2.0f),
-        trackBrush_.Get());
-    if (!name.empty())
+    ID2D1Bitmap* iconBitmap = (executablePath || isSystemSounds)
+        ? iconLoader_.ForExecutable(ctx, executablePath, isSystemSounds)
+        : nullptr;
+
+    if (iconBitmap)
     {
-        const std::wstring initial(1, static_cast<wchar_t>(towupper(name[0])));
-        ctx->DrawText(initial.c_str(), 1, labelFormat_.Get(), layout.icon, textBrush_.Get());
+        ctx->DrawBitmap(iconBitmap, layout.icon);
+    }
+    else
+    {
+        // Fallback when extraction fails (or for the master/"Device" strip,
+        // which has no associated executable): a colored circle with the
+        // name's initial, rather than leaving a blank hole in the card.
+        const float iconCx = (layout.icon.left + layout.icon.right) / 2.0f;
+        const float iconCy = (layout.icon.top + layout.icon.bottom) / 2.0f;
+        ctx->FillEllipse(
+            D2D1::Ellipse(D2D1::Point2F(iconCx, iconCy), (layout.icon.right - layout.icon.left) / 2.0f,
+                          (layout.icon.bottom - layout.icon.top) / 2.0f),
+            trackBrush_.Get());
+        if (!name.empty())
+        {
+            const std::wstring initial(1, static_cast<wchar_t>(towupper(name[0])));
+            ctx->DrawText(initial.c_str(), 1, labelFormat_.Get(), layout.icon, textBrush_.Get());
+        }
     }
 
     fader.Draw(ctx, trackBrush_.Get(), accentBrush_.Get(), accentBrush_.Get(), accentHoverBrush_.Get(), windowRingBrush_.Get());
@@ -650,6 +802,8 @@ void MainWindow::SyncStrip(ChannelStrip& strip, const winmix::audio::AudioSessio
 {
     strip.name = snapshot.displayName;
     strip.active = snapshot.IsActive();
+    strip.executablePath = snapshot.executablePath;
+    strip.isSystemSounds = snapshot.isSystemSounds;
     strip.meter.SetLevel(snapshot.peakLevel);
     strip.mute.SetMuted(snapshot.isMuted);
 
@@ -667,6 +821,8 @@ ChannelStrip MainWindow::CreateStrip(const winmix::audio::AudioSessionSnapshot& 
     strip.pid = snapshot.pid;
     strip.name = snapshot.displayName;
     strip.active = snapshot.IsActive();
+    strip.executablePath = snapshot.executablePath;
+    strip.isSystemSounds = snapshot.isSystemSounds;
     strip.fader.SetValue(VolumeCurve::ToPosition(snapshot.volume));
     strip.mute.SetMuted(snapshot.isMuted);
     strip.meter.SetLevel(snapshot.peakLevel);

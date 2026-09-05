@@ -1,0 +1,120 @@
+#include "TrayIcon.h"
+
+#include <windowsx.h>
+
+namespace winmix::app {
+
+namespace {
+constexpr UINT_PTR kMenuOpenId = 1;
+constexpr UINT_PTR kMenuExitId = 2;
+constexpr UINT_PTR kMenuInputDeviceBase = 100; // + index into the current device list
+} // namespace
+
+TrayIcon::TrayIcon(HWND owner, UINT callbackMessage, HICON icon)
+    : owner_(owner), callbackMessage_(callbackMessage)
+{
+    nid_.cbSize = sizeof(nid_);
+    nid_.hWnd = owner_;
+    nid_.uID = 1;
+    nid_.uFlags = NIF_ICON | NIF_MESSAGE | NIF_TIP;
+    nid_.uCallbackMessage = callbackMessage_;
+    nid_.hIcon = icon;
+    wcsncpy_s(nid_.szTip, L"WinMix", _TRUNCATE);
+
+    added_ = Shell_NotifyIconW(NIM_ADD, &nid_) != FALSE;
+}
+
+TrayIcon::~TrayIcon()
+{
+    if (added_)
+    {
+        Shell_NotifyIconW(NIM_DELETE, &nid_);
+    }
+}
+
+void TrayIcon::OnCallback(LPARAM lParam)
+{
+    switch (LOWORD(lParam))
+    {
+    case WM_LBUTTONUP:
+        if (onOpen)
+        {
+            onOpen();
+        }
+        break;
+
+    case WM_RBUTTONUP:
+    case WM_CONTEXTMENU:
+        ShowContextMenu();
+        break;
+
+    default:
+        break;
+    }
+}
+
+void TrayIcon::ShowContextMenu()
+{
+    HMENU menu = CreatePopupMenu();
+    AppendMenuW(menu, MF_STRING, kMenuOpenId, L"Open");
+    AppendMenuW(menu, MF_SEPARATOR, 0, nullptr);
+
+    const std::vector<TrayInputDevice> devices = listInputDevices ? listInputDevices() : std::vector<TrayInputDevice>{};
+
+    HMENU inputMenu = CreatePopupMenu();
+    for (size_t i = 0; i < devices.size(); ++i)
+    {
+        const UINT flags = MF_STRING | (devices[i].isDefault ? MF_CHECKED : 0u);
+        AppendMenuW(inputMenu, flags, kMenuInputDeviceBase + i, devices[i].friendlyName.c_str());
+    }
+
+    if (!devices.empty())
+    {
+        AppendMenuW(menu, MF_POPUP, reinterpret_cast<UINT_PTR>(inputMenu), L"Microphone");
+    }
+    else
+    {
+        DestroyMenu(inputMenu);
+    }
+
+    AppendMenuW(menu, MF_SEPARATOR, 0, nullptr);
+    AppendMenuW(menu, MF_STRING, kMenuExitId, L"Exit");
+
+    POINT pt;
+    GetCursorPos(&pt);
+
+    // Both lines are the standard, documented workaround for a tray
+    // context menu that otherwise fails to dismiss on click-away.
+    SetForegroundWindow(owner_);
+    const int selected = TrackPopupMenu(
+        menu, TPM_RIGHTBUTTON | TPM_RETURNCMD | TPM_NONOTIFY,
+        pt.x, pt.y, 0, owner_, nullptr);
+    PostMessageW(owner_, WM_NULL, 0, 0);
+
+    if (selected == static_cast<int>(kMenuOpenId))
+    {
+        if (onOpen)
+        {
+            onOpen();
+        }
+    }
+    else if (selected == static_cast<int>(kMenuExitId))
+    {
+        if (onExit)
+        {
+            onExit();
+        }
+    }
+    else if (selected >= static_cast<int>(kMenuInputDeviceBase))
+    {
+        const size_t index = static_cast<size_t>(selected) - kMenuInputDeviceBase;
+        if (index < devices.size() && setDefaultInputDevice)
+        {
+            setDefaultInputDevice(devices[index].id);
+        }
+    }
+
+    DestroyMenu(menu); // recursively destroys the attached input submenu too
+}
+
+} // namespace winmix::app
