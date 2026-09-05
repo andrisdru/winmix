@@ -1,5 +1,5 @@
 ---
-description: Close any running WinMix instance, build the solution, and launch it fresh
+description: Close any running WinMix instance, build the native app, and launch it fresh
 ---
 
 Build and run WinMix, restarting it if an instance is already running.
@@ -10,19 +10,21 @@ Build and run WinMix, restarting it if an instance is already running.
    instance silently swallows the next launch") — so the running copy must be
    killed before a rebuild can be observed:
    ```
-   taskkill //F //IM WinMix.exe
+   Stop-Process -Name WinMix -Force -ErrorAction SilentlyContinue
    ```
-   A "no tasks running" result is fine — it just means nothing needed closing.
+   No matching process is fine — it just means nothing needed closing.
 
-2. Build the solution and fix any errors before continuing:
-   ```
-   dotnet build WinMix.sln
+2. Build the `x64-debug` preset and fix any errors before continuing. If
+   `cmake` isn't on `PATH`, add the VS Build Tools' bundled copy first:
+   ```powershell
+   $env:PATH += ";C:\Program Files (x86)\Microsoft Visual Studio\2022\BuildTools\Common7\IDE\CommonExtensions\Microsoft\CMake\CMake\bin;C:\Program Files (x86)\Microsoft Visual Studio\2022\BuildTools\Common7\IDE\CommonExtensions\Microsoft\CMake\Ninja"
+   cmake --build --preset x64-debug
    ```
    Do not proceed to launch a build that failed.
 
 3. Launch the app in the background so this command can finish:
    ```
-   dotnet run --project src/WinMix.App
+   native\build\x64-debug\WinMix.App\Debug\WinMix.exe
    ```
 
 4. Confirm it actually started: check `tasklist` for `WinMix.exe` and check the

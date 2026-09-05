@@ -3,6 +3,4 @@
 
 1 RT_MANIFEST "app.manifest"
 
-// Referenced from the .NET project's own asset by relative path rather than
-// a copy, so the two builds can never visually diverge.
-IDI_APPICON ICON "../../../src/WinMix.App/Assets/AppIcon.ico"
+IDI_APPICON ICON "AppIcon.ico"

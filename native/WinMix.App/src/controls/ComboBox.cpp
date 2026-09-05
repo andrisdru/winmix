@@ -11,7 +11,7 @@ using Microsoft::WRL::ComPtr;
 namespace winmix::app::controls {
 
 namespace {
-constexpr wchar_t kPopupClassName[] = L"WinMixCppComboPopup";
+constexpr wchar_t kPopupClassName[] = L"WinMixComboPopup";
 constexpr int kBaseFontHeight = 14; // logical pixels at 96 DPI, negative-height (character height) convention
 constexpr int kPopupMinWidth = 160; // logical pixels at 96 DPI, before scaling
 } // namespace

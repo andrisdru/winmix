@@ -12,7 +12,7 @@ add_executable(winmix_app WIN32
 )
 
 set_target_properties(winmix_app PROPERTIES
-    OUTPUT_NAME "WinMixCpp"
+    OUTPUT_NAME "WinMix"
 )
 
 # WinMix.rc embeds our own hand-authored manifest as resource ID 1

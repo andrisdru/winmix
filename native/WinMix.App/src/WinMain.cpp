@@ -5,11 +5,11 @@
 
 namespace {
 
-// Session-local (Local\ prefix), matching the .NET port's mutex name and
-// scope exactly. There is deliberately no re-activation IPC: a second
-// launch just quietly exits, same as today -- it does not forward an "open
-// mixer" signal to the first instance.
-constexpr wchar_t kInstanceMutexName[] = L"Local\\WinMixCpp.SingleInstance";
+// Session-local (Local\ prefix) so it can't collide with another user's
+// session on the same machine. There is deliberately no re-activation IPC:
+// a second launch just quietly exits -- it does not forward an "open mixer"
+// signal to the first instance.
+constexpr wchar_t kInstanceMutexName[] = L"Local\\WinMix.SingleInstance";
 
 } // namespace
 

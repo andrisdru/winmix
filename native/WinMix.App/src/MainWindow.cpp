@@ -22,8 +22,8 @@ namespace winmix::app {
 
 namespace {
 
-constexpr wchar_t kClassName[] = L"WinMixCppWindowClass";
-constexpr wchar_t kWindowTitle[] = L"WinMix (C++)";
+constexpr wchar_t kClassName[] = L"WinMixWindowClass";
+constexpr wchar_t kWindowTitle[] = L"WinMix";
 
 constexpr float kMargin = 12.0f;
 constexpr float kCardWidth = 84.0f;

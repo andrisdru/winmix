@@ -1,7 +1,7 @@
 # WinMix
 
 A lightweight Windows tray utility for **per-application** audio control — a
-volume mixer today, with a per-application equalizer planned next.
+volume mixer, built as a native, dependency-free `WinMix.exe`.
 
 WinMix sits in the system tray and gives you a compact mixer window: an
 independent volume slider, mute button, and peak meter for every app currently
@@ -18,32 +18,39 @@ recording (microphone) devices — all without leaving the tray.
   the main window and the tray icon's context menu
 - Runs quietly in the tray; closing the window hides it rather than exiting —
   use "Exit" in the tray menu to actually quit
+- A single native `WinMix.exe` — no .NET runtime, no other dependencies
 
 ## Requirements
 
 - Windows 10 (build 20348 or later) or Windows 11
-- [.NET 8 SDK](https://dotnet.microsoft.com/download/dotnet/8.0) to build
-- The built app needs the .NET 8 Desktop Runtime installed, unless published
-  as self-contained (see below)
+- To build: Visual Studio Build Tools 2022, "Desktop development with C++"
+  workload, plus the "C++ CMake tools for Windows" optional component (this
+  bundles the CMake/Ninja used below — no separate install needed)
 
 ## Building
 
 ```powershell
-dotnet build WinMix.sln
+cmake --build --preset x64-debug
 ```
 
-Both projects build with warnings treated as errors, so a clean build means a
-clean build.
+Both `WinMix.Audio` and `WinMix.App` build with warnings treated as errors,
+so a clean build means a clean build.
+
+If `cmake` isn't on `PATH`, add the VS Build Tools' bundled copy first:
+
+```powershell
+$env:PATH += ";C:\Program Files (x86)\Microsoft Visual Studio\2022\BuildTools\Common7\IDE\CommonExtensions\Microsoft\CMake\CMake\bin;C:\Program Files (x86)\Microsoft Visual Studio\2022\BuildTools\Common7\IDE\CommonExtensions\Microsoft\CMake\Ninja"
+```
 
 ## Running
 
 ```powershell
-dotnet run --project src/WinMix.App
+native\build\x64-debug\WinMix.App\Debug\WinMix.exe
 ```
 
 WinMix only allows a single running instance — launching a second copy while
-one is already running silently hands off to it and exits, so you won't see
-your changes. If you're not sure one isn't already running, close it first:
+one is already running silently exits, so you won't see your changes. If
+you're not sure one isn't already running, close it first:
 
 ```powershell
 Stop-Process -Name WinMix -Force -ErrorAction SilentlyContinue
@@ -52,38 +59,30 @@ Stop-Process -Name WinMix -Force -ErrorAction SilentlyContinue
 ## Testing
 
 ```powershell
-dotnet test WinMix.sln
+native\build\x64-debug\tests\Debug\winmix_audio_tests.exe
 
-# Run one test or one class
-dotnet test --filter "FullyQualifiedName~VolumeCurveTests"
+# Run one test case
+native\build\x64-debug\tests\Debug\winmix_audio_tests.exe --test-case="VolumeCurve*"
 ```
 
-## Producing a standalone build
+## Producing a release build
 
 ```powershell
-dotnet publish src/WinMix.App/WinMix.App.csproj -c Release
+cmake --build --preset x64-package
 ```
 
-This produces a framework-dependent build at
-`src/WinMix.App/bin/Release/net8.0-windows/publish/WinMix.exe`, which needs the
-.NET 8 Desktop Runtime on the machine that runs it. To produce a single,
-self-contained `.exe` that needs nothing preinstalled, add:
-
-```powershell
-dotnet publish src/WinMix.App/WinMix.App.csproj -c Release -r win-x64 --self-contained true -p:PublishSingleFile=true
-```
+This produces a fully self-contained, statically-linked `WinMix.exe` under
+`native\build\x64-package\WinMix.App\Release\` with tests and dev tools
+excluded from the build graph — no VCRUNTIME/MSVCP/UCRT dependency to
+install on the machine that runs it.
 
 ## Project layout
 
-- `src/WinMix.Audio` — all Core Audio / WASAPI interaction, via NAudio plus
-  hand-rolled COM interop for the undocumented Windows APIs NAudio doesn't
-  cover. No UI dependencies, so it stays reusable once the equalizer lands.
-- `src/WinMix.App` — the WPF shell: the mixer window, view models, and tray
-  icon.
-- `tests/WinMix.Audio.Tests` — xunit tests against the audio project.
-
-## Roadmap
-
-A per-application equalizer, built on WASAPI process loopback capture rather
-than a system-wide audio driver, so EQ can be applied to one app's audio
-without affecting anything else.
+- `native/WinMix.Audio` — all Core Audio / WASAPI interaction, via raw COM
+  interop (no third-party audio library). No UI dependencies, so it stays
+  independently testable.
+- `native/WinMix.App` — the Win32 + Direct2D/DirectWrite shell: the mixer
+  window, custom controls, and tray icon.
+- `native/tests` — doctest tests against `WinMix.Audio`.
+- `native/tools/AudioSmokeTest` — a console tool for verifying the audio
+  layer against real playback, independent of the UI.
