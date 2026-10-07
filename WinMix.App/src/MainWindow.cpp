@@ -25,7 +25,7 @@ namespace winmix::app {
 
 namespace {
 
-constexpr wchar_t kClassName[] = L"WinMixWindowClass";
+constexpr const wchar_t* kClassName = kWindowClassName;
 constexpr wchar_t kWindowTitle[] = L"WinMix";
 
 constexpr float kMargin = 12.0f;
@@ -552,6 +552,11 @@ LRESULT MainWindow::WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam)
             {
                 tray_->OnCallback(lParam);
             }
+            return 0;
+        }
+        if (msg == showMixerMessage_)
+        {
+            ShowMixer();
             return 0;
         }
         return DefWindowProcW(hwnd, msg, wParam, lParam);
