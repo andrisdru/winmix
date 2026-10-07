@@ -41,10 +41,12 @@ $env:PATH += ";C:\Program Files (x86)\Microsoft Visual Studio\2022\BuildTools\Co
 Both `WinMix.Audio` and `WinMix.App` build as C++20 with the VS generator
 (`CMakePresets.json`), producing a multi-config tree under `build/<preset>/`.
 
-**A running instance silently swallows the next launch.** `WinMain` holds a
+**A running instance swallows the next launch.** `WinMain` holds a
 single-instance mutex (`Local\WinMix.SingleInstance`), so a second launch
-exits immediately with no visible effect — a rebuild that appears to do
-nothing usually means one is already resident in the tray. Kill it first:
+exits immediately after posting a registered `WinMix.ShowMixer` message that
+makes the resident instance show its window. A rebuild that appears to do
+nothing (still running the old code) usually means one is already resident
+in the tray. Kill it first:
 
 ```powershell
 Stop-Process -Name WinMix -Force -ErrorAction SilentlyContinue

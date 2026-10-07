@@ -23,6 +23,11 @@
 
 namespace winmix::app {
 
+// Shared with WinMain: a second launch finds the running instance's window by
+// class and posts the registered message below, which makes it show the mixer.
+inline constexpr wchar_t kWindowClassName[] = L"WinMixWindowClass";
+inline constexpr wchar_t kShowMixerMessageName[] = L"WinMix.ShowMixer";
+
 // Precomputed per-frame geometry for one channel strip's non-control
 // elements (card background, icon placeholder, text labels), filled by
 // MainWindow::LayoutStrip and consumed by MainWindow::DrawStrip.
@@ -153,6 +158,7 @@ private:
     IconLoader iconLoader_;
     std::unique_ptr<TrayIcon> tray_;
     bool timerRunning_ = false;
+    UINT showMixerMessage_ = RegisterWindowMessageW(kShowMixerMessageName);
 
     controls::FaderControl masterFader_;
     controls::MuteToggle masterMute_;

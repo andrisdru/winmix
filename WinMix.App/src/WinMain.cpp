@@ -7,9 +7,8 @@
 namespace {
 
 // Session-local (Local\ prefix) so it can't collide with another user's
-// session on the same machine. There is deliberately no re-activation IPC:
-// a second launch just quietly exits -- it does not forward an "open mixer"
-// signal to the first instance.
+// session on the same machine. A second launch posts a "show mixer" message to
+// the first instance's window and exits.
 constexpr wchar_t kInstanceMutexName[] = L"Local\\WinMix.SingleInstance";
 
 // Appended to the Run-key command line by Autostart::SetEnabled() -- lets
@@ -54,6 +53,20 @@ int WINAPI wWinMain(HINSTANCE hInstance, HINSTANCE, PWSTR, int nCmdShow)
         if (instanceMutex)
         {
             CloseHandle(instanceMutex);
+        }
+        // Autostart's --minimized launch should stay quiet; a manual launch
+        // asks the resident instance to show itself.
+        if (!StartedMinimized())
+        {
+            if (HWND existing = FindWindowW(winmix::app::kWindowClassName, nullptr))
+            {
+                // This process holds foreground rights from the user's launch;
+                // pass them on so the other instance's SetForegroundWindow works.
+                DWORD pid = 0;
+                GetWindowThreadProcessId(existing, &pid);
+                AllowSetForegroundWindow(pid);
+                PostMessageW(existing, RegisterWindowMessageW(winmix::app::kShowMixerMessageName), 0, 0);
+            }
         }
         return 0;
     }
